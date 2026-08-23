@@ -2777,7 +2777,19 @@ static int pump_keys(bool tty) {
         }
         else if (c == 'r') {
             g_rt = !g_rt;
-            if (g_rt) full_repaint_ = true;
+            if (g_rt) {
+                /* fast-forward the solve so the heightfield is a finished world */
+                for (int rt_try = 0; rt_try < 200; rt_try++) {
+                    bool all_done = true;
+                    for (int i = 0; i < W_ * H_; i++)
+                        if (pc64(dom_[i]) != 1) { all_done = false; break; }
+                    if (all_done) break;
+                    int r2 = wfc_step();
+                    if (r2 == 1) break;
+                    if (r2 == -1) grid_reset();
+                }
+                full_repaint_ = true;
+            } else full_repaint_ = true;
         }
         else if (c == 'k') { g_crt = !g_crt; set_note("CRT %s", g_crt ? "on" : "off"); }
         else if (c == 'W') {
