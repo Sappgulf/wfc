@@ -1,0 +1,18 @@
+# build artifacts
+wfc
+wfc_asan
+wfc_asan.dSYM/
+*.o
+
+# generated outputs
+*.gif
+*.png
+*.bmp
+*.html
+
+# runtime state
+.wfcrc
+wfc_world.bin
+
+# mac junk
+.DS_Store
