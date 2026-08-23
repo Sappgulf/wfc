@@ -1302,7 +1302,7 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                                 if (!bits) {
                                     /* faint background shimmer in active columns */
                                     uint32_t bgp = hash3((uint32_t)wx, (uint32_t)row, 999);
-                                    if ((bgp % 100) < band * 2) bits = 0x05;
+                                    if ((bgp % 100) < (uint32_t)band * 2u) bits = 0x05;
                                     if (bits) col = scalec((RGB){0, 90, 40}, pulse * 0.6);
                                 }
                             } else if (!strcmp(mode, "galaxy")) {
