@@ -12,10 +12,14 @@ import re
 import select
 import signal
 import struct
+import sys
 import termios
 import time
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sandbox  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,8 +34,9 @@ class Session:
         self.pid, self.fd = pty.fork()
         if self.pid == 0:                       # child
             os.chdir(ROOT)
-            os.execv(str(BINARY), [str(BINARY), "--mode", "circuit",
-                                   "--w", "40", "--h", "20", *args])
+            os.execve(str(BINARY), [str(BINARY), "--mode", "circuit",
+                                    "--w", "40", "--h", "20", *args],
+                      sandbox.env())
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ,
                     struct.pack("HHHH", rows, cols, 0, 0))
         self.settle(1.2)
@@ -80,6 +85,18 @@ def plain(raw):
     return re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", raw).decode("utf-8", "replace")
 
 
+def last_screen(raw):
+    """Only the final frame.
+
+    The app redraws every 50ms, so by the time a keystroke takes effect the
+    pty already holds a backlog of frames drawn before it. Asserting over the
+    whole buffer tests the past as well as the present; split on the clear and
+    keep the last screen.
+    """
+    frames = raw.split(b"\x1b[2J")
+    return plain(frames[-1] if frames else raw)
+
+
 def preview_label(raw):
     """The world name printed under the picker's thumbnail."""
     found = re.findall(r"▀([a-z]+)", plain(raw))
@@ -116,12 +133,15 @@ class InteractiveTests(unittest.TestCase):
         self.session.send(b"/")
         self.session.send(b"vin")
         chosen = self.session.send(b"\r", wait=1.6)
+        self.assertNotIn("PICK A WORLD", last_screen(chosen),
+                         "enter must close the picker")
         self.assertIn("vinyl", plain(chosen), "enter switches to the world")
 
         reopened = self.session.send(b"/")
         self.assertIn("PICK A WORLD", plain(reopened))
         cancelled = self.session.send(ESC, wait=1.4)
-        self.assertNotIn("PICK A WORLD", plain(cancelled))
+        self.assertNotIn("PICK A WORLD", last_screen(cancelled),
+                         "escape must close the picker")
 
     def test_arrow_keys_do_not_swallow_the_keys_that_follow(self):
         """ESC used to strand the reader in the mouse state machine."""

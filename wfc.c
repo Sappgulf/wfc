@@ -109,43 +109,44 @@ typedef struct {
     bool coarse;          /* seed bands from 2D value noise, not just the ramp */
     unsigned char group;
     unsigned tick_ms;     /* idle-animation clock bucket; 0 = static */
+    signed char tone;     /* semitones from A2: the world's key, drone and stinger */
 } ModeSpec;
 
-/*             name        blurb                                             build            sc     tor    sr     ramp   flip   net    crse   group         tick */
+/*             name        blurb                                             build            sc     tor    sr     ramp   flip   net    crse   group         tick  key */
 static const ModeSpec MODESPEC[] = {
-    {"circuit",  "rainbow circuit boards, signals racing traces",   build_circuit,  false, true,  false, false, false, false, false, MG_CONNECTOR, 140},
-    {"terrain",  "hillshaded biomes + carved rivers + day cycle",   build_terrain,  true,  true,  true,  false, false, false, false, MG_FIELD,     260},
-    {"truchet",  "woven arcs with a travelling light pulse",        build_truchet,  false, false, false, false, false, false, false, MG_CONNECTOR, 500},
-    {"fire",     "living flames with rising embers",                build_fire,     true,  false, true,  true,  false, false, false, MG_FIELD,      90},
-    {"waves",    "rolling ocean, crest lines, moonpath",            build_waves,    true,  true,  true,  false, false, false, true,  MG_FIELD,     160},
-    {"dungeon",  "torch-lit catacombs with breathing warmth",       build_dungeon,  false, true,  false, false, false, false, false, MG_CARVE,     220},
-    {"maze",     "labyrinth with wall pulses",                      build_maze,     false, true,  false, false, false, false, false, MG_CARVE,     360},
-    {"galaxy",   "nebulae with shooting stars",                     build_galaxy,   true,  true,  true,  false, false, false, true,  MG_FIELD,     100},
-    {"city",     "night skylines with beacons + rain",              build_city,     true,  false, true,  true,  false, false, false, MG_FIELD,     400},
-    {"aurora",   "drifting green curtains over stars",              build_aurora,   true,  false, true,  true,  true, false, false,  MG_FIELD,     150},
-    {"matrix",   "digital rain with white-hot glyph heads",         build_matrix,   true,  true,  true,  false, false, false, true,  MG_FIELD,     140},
-    {"pipes",    "water pressure networks, pulses racing runs",     build_pipes,    false, true,  false, false, false, false, false, MG_CONNECTOR, 180},
-    {"mondrian", "painted plazas split by charcoal rules",          build_mondrian, true,  true,  true,  false, false, false, true,  MG_FIELD,     400},
-    {"koi",      "pond bands, koi gliding between lily pads",       build_koi,      true,  true,  true,  false, false, false, true,  MG_FIELD,     250},
-    {"lava",     "crusting basalt over a molten breath",            build_lava,     true,  false, true,  true,  true, false, false,  MG_FIELD,     130},
-    {"sakura",   "spring night, blossom petals drifting down",      build_sakura,   true,  false, true,  true,  false, false, false, MG_FIELD,     120},
-    {"geode",    "crystal cavern facets with wandering glints",     build_geode,    true,  true,  true,  false, false, false, true,  MG_FIELD,     160},
-    {"lantern",  "festival sky, lanterns rising past the stars",    build_lantern,  true,  false, true,  true,  true, false, false,  MG_FIELD,     220},
-    {"dunes",    "heat shimmer under a fixed blazing sun",          build_dunes,    true,  false, true,  true,  false, false, false, MG_FIELD,     200},
-    {"reef",     "caustic water, coral, bubbles, a fish school",    build_reef,     true,  false, true,  true,  false, false, false, MG_FIELD,     160},
-    {"stained",  "jewel-glass panes, lead lines, roaming light",    build_stained,  true,  true,  true,  false, false, false, true,  MG_FIELD,     300},
-    {"streets",  "arterial grid, lanes, signals, intersections",    build_streets,  false, false, false, false, false, true, false,  MG_CONNECTOR, 170},
-    {"neurons",  "branching dendrites with travelling potentials",  build_neurons,  false, true,  false, false, false, true, false,  MG_CONNECTOR,  95},
-    {"mycelium", "living root networks, knots, drifting spores",    build_mycelium, false, true,  false, false, false, true, false,  MG_CONNECTOR, 260},
-    {"delta",    "tidal estuary channels, confluences, sandbars",   build_delta,    false, false, false, false, false, true, false,  MG_CONNECTOR, 145},
-    {"storm",    "thunderhead anvils, rain veils, forked lightning", build_storm,    true,  false, true,  true,  false, false, true,  MG_FIELD,     110},
-    {"glacier",  "blue ice shelves split by crevasses and glints",   build_glacier,  true,  false, true,  true,  true,  false, true,  MG_FIELD,     280},
-    {"bamboo",   "swaying stalks and nodes under a lit canopy",      build_bamboo,   true,  false, true,  true,  false, false, false, MG_FIELD,     130},
-    {"solar",    "granulated photosphere, sunspots, arcing flares",  build_solar,    true,  true,  true,  false, false, false, true,  MG_FIELD,     100},
-    {"rail",     "marshalling yard, running trains, switch lamps",   build_rail,     false, false, false, false, false, true, false,  MG_CONNECTOR, 155},
-    {"canyon",   "banded strata, a river cut, dust in the light",    build_canyon,   true,  false, true,  true,  false, false, false, MG_FIELD,     240},
-    {"vinyl",    "concentric grooves under a sweeping highlight",    build_vinyl,    true,  true,  true,  false, false, false, false, MG_FIELD,      90},
-    {"loom",     "warp and weft crossing over and under on the web", build_loom,     false, false, false, false, false, false, false, MG_CONNECTOR, 320},
+    {"circuit",  "rainbow circuit boards, signals racing traces",   build_circuit,  false, true,  false, false, false, false, false, MG_CONNECTOR, 140,   0},
+    {"terrain",  "hillshaded biomes + carved rivers + day cycle",   build_terrain,  true,  true,  true,  false, false, false, false, MG_FIELD,     260,  -2},
+    {"truchet",  "woven arcs with a travelling light pulse",        build_truchet,  false, false, false, false, false, false, false, MG_CONNECTOR, 500,   7},
+    {"fire",     "living flames with rising embers",                build_fire,     true,  false, true,  true,  false, false, false, MG_FIELD,      90,  -3},
+    {"waves",    "rolling ocean, crest lines, moonpath",            build_waves,    true,  true,  true,  false, false, false, true,  MG_FIELD,     160,  -5},
+    {"dungeon",  "torch-lit catacombs with breathing warmth",       build_dungeon,  false, true,  false, false, false, false, false, MG_CARVE,     220, -10},
+    {"maze",     "labyrinth with wall pulses",                      build_maze,     false, true,  false, false, false, false, false, MG_CARVE,     360,  -7},
+    {"galaxy",   "nebulae with shooting stars",                     build_galaxy,   true,  true,  true,  false, false, false, true,  MG_FIELD,     100,   5},
+    {"city",     "night skylines with beacons + rain",              build_city,     true,  false, true,  true,  false, false, false, MG_FIELD,     400,  -6},
+    {"aurora",   "drifting green curtains over stars",              build_aurora,   true,  false, true,  true,  true, false, false,  MG_FIELD,     150,   9},
+    {"matrix",   "digital rain with white-hot glyph heads",         build_matrix,   true,  true,  true,  false, false, false, true,  MG_FIELD,     140,  -8},
+    {"pipes",    "water pressure networks, pulses racing runs",     build_pipes,    false, true,  false, false, false, false, false, MG_CONNECTOR, 180,   2},
+    {"mondrian", "painted plazas split by charcoal rules",          build_mondrian, true,  true,  true,  false, false, false, true,  MG_FIELD,     400,   4},
+    {"koi",      "pond bands, koi gliding between lily pads",       build_koi,      true,  true,  true,  false, false, false, true,  MG_FIELD,     250,  -1},
+    {"lava",     "crusting basalt over a molten breath",            build_lava,     true,  false, true,  true,  true, false, false,  MG_FIELD,     130, -12},
+    {"sakura",   "spring night, blossom petals drifting down",      build_sakura,   true,  false, true,  true,  false, false, false, MG_FIELD,     120,   3},
+    {"geode",    "crystal cavern facets with wandering glints",     build_geode,    true,  true,  true,  false, false, false, true,  MG_FIELD,     160,   8},
+    {"lantern",  "festival sky, lanterns rising past the stars",    build_lantern,  true,  false, true,  true,  true, false, false,  MG_FIELD,     220,  11},
+    {"dunes",    "heat shimmer under a fixed blazing sun",          build_dunes,    true,  false, true,  true,  false, false, false, MG_FIELD,     200,  -4},
+    {"reef",     "caustic water, coral, bubbles, a fish school",    build_reef,     true,  false, true,  true,  false, false, false, MG_FIELD,     160,   1},
+    {"stained",  "jewel-glass panes, lead lines, roaming light",    build_stained,  true,  true,  true,  false, false, false, true,  MG_FIELD,     300,   6},
+    {"streets",  "arterial grid, lanes, signals, intersections",    build_streets,  false, false, false, false, false, true, false,  MG_CONNECTOR, 170,  -8},
+    {"neurons",  "branching dendrites with travelling potentials",  build_neurons,  false, true,  false, false, false, true, false,  MG_CONNECTOR,  95,  14},
+    {"mycelium", "living root networks, knots, drifting spores",    build_mycelium, false, true,  false, false, false, true, false,  MG_CONNECTOR, 260,  -9},
+    {"delta",    "tidal estuary channels, confluences, sandbars",   build_delta,    false, false, false, false, false, true, false,  MG_CONNECTOR, 145,  -1},
+    {"storm",    "thunderhead anvils, rain veils, forked lightning", build_storm,    true,  false, true,  true,  false, false, true,  MG_FIELD,     110, -11},
+    {"glacier",  "blue ice shelves split by crevasses and glints",   build_glacier,  true,  false, true,  true,  true,  false, true,  MG_FIELD,     280,  10},
+    {"bamboo",   "swaying stalks and nodes under a lit canopy",      build_bamboo,   true,  false, true,  true,  false, false, false, MG_FIELD,     130,  12},
+    {"solar",    "granulated photosphere, sunspots, arcing flares",  build_solar,    true,  true,  true,  false, false, false, true,  MG_FIELD,     100,  15},
+    {"rail",     "marshalling yard, running trains, switch lamps",   build_rail,     false, false, false, false, false, true, false,  MG_CONNECTOR, 155,  -6},
+    {"canyon",   "banded strata, a river cut, dust in the light",    build_canyon,   true,  false, true,  true,  false, false, false, MG_FIELD,     240,   7},
+    {"vinyl",    "concentric grooves under a sweeping highlight",    build_vinyl,    true,  true,  true,  false, false, false, false, MG_FIELD,      90,   2},
+    {"loom",     "warp and weft crossing over and under on the web", build_loom,     false, false, false, false, false, false, false, MG_CONNECTOR, 320,   5},
 };
 #define NMODES ((int)(sizeof MODESPEC / sizeof *MODESPEC))
 static int g_mode_idx = 0;
@@ -4690,6 +4691,11 @@ static void emit_frame_img(void) {
 /* ---------------- tiny synth: procedural wav sfx via afplay ---------------- */
 static char g_gallery_path[512] = {0};
 static bool g_sfx_ready = false;
+/* Cached wavs live in /tmp and outlive the binary, so the synth is versioned:
+ * change the sound and the old files are no longer the ones we look for. */
+#define SFX_VERSION 2
+#define SFX_DONE "/tmp/wfx2_done.wav"
+#define SFX_BLIP "/tmp/wfx2_blip.wav"
 
 static void put_u32(FILE *f, uint32_t v) {
     uint8_t b[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
@@ -4715,76 +4721,79 @@ static void write_wav(const char *path, const float *samples, int n) {
     }
     fclose(f);
 }
+/* Two hand-kept tables of 25 used to carry the sound: stinger note rows and
+ * drone roots, both indexed `mi % 25`. Eight worlds past the twenty-fifth
+ * therefore played another world's music — storm sounded exactly like
+ * circuit. Both are now derived from the registry's `tone` and `group`, so a
+ * new world arrives with its own key and cannot borrow anyone else's. */
+static double mode_hz(int mi, int octave) {
+    if (mi < 0 || mi >= NMODES) mi = 0;
+    return 110.0 * pow(2.0, MODESPEC[mi].tone / 12.0 + octave);
+}
+
+/* The chord shape says what kind of world it is: fields open out, connector
+ * lattices move in fourths and fifths, carved worlds sit in a minor. */
+static void mode_arpeggio(int mi, int steps[4]) {
+    static const int FIELD[4]     = {0, 4, 7, 12};
+    static const int CONNECTOR[4] = {0, 5, 7, 12};
+    static const int CARVE[4]     = {0, 3, 7, 10};
+    const int *shape = FIELD;
+    if (mi >= 0 && mi < NMODES) {
+        if (MODESPEC[mi].group == MG_CONNECTOR) shape = CONNECTOR;
+        else if (MODESPEC[mi].group == MG_CARVE) shape = CARVE;
+    }
+    for (int i = 0; i < 4; i++) steps[i] = shape[i];
+}
+
+/* One struck voice: a couple of detuned partials over a short attack. Pure
+ * sines read as a test tone; the detune and the odd harmonic give it body. */
+static void voice_add(float *buf, int n, int start, double hz,
+                      double amp, double decay) {
+    const double SR = 44100.0;
+    for (int i = start; i < n; i++) {
+        double t = (double)(i - start) / SR;
+        double env = exp(-t * decay) * (t < 0.006 ? t / 0.006 : 1.0);
+        double v = sin(2 * M_PI * hz * t) +
+                   0.45 * sin(2 * M_PI * hz * 2.0 * t + 0.7) +
+                   0.22 * sin(2 * M_PI * hz * 3.0 * t + 1.9) +
+                   0.30 * sin(2 * M_PI * hz * 1.005 * t);   /* slow beat */
+        buf[i] += (float)(amp * env * v);
+    }
+}
+
 static void ensure_sfx(void) {
     if (g_sfx_ready) return;
     const int SR = 44100;
     /* completion chord: A4 C#5 E5 A5 arpeggio with soft decay */
     static float done[44100 * 1];
     for (int i = 0; i < 44100; i++) done[i] = 0;
-    float notes[4] = {440.0f, 554.37f, 659.25f, 880.0f};
-    for (int ni = 0; ni < 4; ni++) {
-        int start = ni * 6200;
-        for (int i = start; i < 44100; i++) {
-            double t = (double)(i - start) / SR;
-            float env = (float)exp(-t * 7.0);
-            done[i] += 0.16f * env *
-                       (sinf(2 * (float)M_PI * notes[ni] * t) +
-                        0.35f * sinf(2 * (float)M_PI * notes[ni] * 2 * t));
-        }
-    }
-    write_wav("/tmp/wfc_done.wav", done, 44100);
-    /* click blip */
+    int chord[4];
+    mode_arpeggio(g_mode_idx, chord);
+    double base = mode_hz(g_mode_idx, 2);
+    for (int ni = 0; ni < 4; ni++)
+        voice_add(done, 44100, ni * 6200,
+                  base * pow(2.0, chord[ni] / 12.0), 0.135, 6.0);
+    write_wav(SFX_DONE, done, 44100);
+    /* click blip, pitched into the active world's key so it is not a beep */
     static float blip[2600];
-    for (int i = 0; i < 2600; i++) {
-        double t = (double)i / SR;
-        blip[i] = 0.18f * (float)exp(-t * 60.0) * sinf(2 * (float)M_PI * 950 * t);
-    }
-    write_wav("/tmp/wfc_blip.wav", blip, 2600);
-    /* per-world stingers */
+    for (int i = 0; i < 2600; i++) blip[i] = 0;
+    voice_add(blip, 2600, 0, mode_hz(g_mode_idx, 3), 0.16, 55.0);
+    write_wav(SFX_BLIP, blip, 2600);
+    /* per-world stingers, built from the registry's key and family */
     for (int mi2 = 0; mi2 < NMODES; mi2++) {
         static float st[44100 / 2];
         for (int i = 0; i < 22050; i++) st[i] = 0;
-        float seq[][6][2] = {   /* {freq, startSeconds} pairs, 0-terminated */
-            {{523,0},{659,0.09},{784,0.18},{1046,0.27},{0,0}},
-            {{392,0},{440,0.11},{494,0.22},{587,0.33},{0,0}},
-            {{440,0},{554,0.1},{440,0.2},{554,0.3},{0,0}},
-            {{196,0},{220,0.12},{247,0.24},{196,0.36},{0,0}},
-            {{659,0},{880,0.14},{987,0.28},{1319,0.42},{0,0}},
-            {{110,0},{165,0.16},{110,0.32},{147,0.48},{0,0}},
-            {{330,0},{330,0.13},{392,0.26},{330,0.39},{0,0}},
-            {{1046,0},{1319,0.08},{1568,0.16},{2093,0.24},{0,0}},
-            {{262,0},{330,0.14},{392,0.28},{523,0.42},{0,0}},
-            {{392,0},{523,0.12},{659,0.24},{784,0.36},{0,0}},
-            {{330,0},{277,0.16},{330,0.32},{277,0.48},{0,0}},
-            {{294,0},{440,0.12},{392,0.24},{494,0.36},{0,0}},
-            {{247,0},{262,0.16},{294,0.32},{330,0.48},{0,0}},
-            {{440,0},{523,0.14},{587,0.28},{659,0.42},{0,0}},
-            {{98,0},{123,0.2},{98,0.4},{87,0.6},{0,0}},
-            {{659,0},{587,0.12},{523,0.24},{440,0.36},{0,0}},
-            {{1319,0},{1046,0.09},{1568,0.18},{2093,0.27},{0,0}},
-            {{262,0},{330,0.12},{392,0.24},{523,0.36},{0,0}},
-            {{147,0},{220,0.14},{196,0.28},{294,0.42},{0,0}},
-            {{523,0},{659,0.1},{784,0.2},{988,0.3},{0,0}},
-            {{392,0},{587,0.14},{784,0.28},{1175,0.42},{0,0}},
-            {{196,0},{294,0.14},{392,0.28},{587,0.42},{0,0}},
-            {{220,0},{330,0.10},{440,0.20},{660,0.30},{0,0}},
-            {{147,0},{196,0.14},{247,0.28},{330,0.42},{0,0}},
-            {{196,0},{247,0.12},{294,0.24},{392,0.36},{0,0}},
-        };
-        const size_t stinger_seed_count = sizeof seq / sizeof seq[0];
-        const size_t tone_row = (size_t)mi2 % stinger_seed_count;
-        const float (*tones)[2] = seq[tone_row];
-        for (int nn2 = 0; nn2 < 5 && tones[nn2][0] > 0; nn2++) {
-            int start = (int)(tones[nn2][1] * SR);
-            float fr = tones[nn2][0];
-            for (int i = start; i < 22050; i++) {
-                double t2 = (double)(i - start) / SR;
-                float env = (float)exp(-t2 * 9.0) * (t2 < 0.01 ? t2 * 100 : 1);
-                st[i] += 0.15f * env * sinf(2 * (float)M_PI * fr * t2);
-            }
+        int steps[4];
+        mode_arpeggio(mi2, steps);
+        double root = mode_hz(mi2, 2);          /* two octaves over the drone */
+        bool descend = MODESPEC[mi2].group == MG_CARVE;
+        for (int nn2 = 0; nn2 < 4; nn2++) {
+            int step = steps[descend ? 3 - nn2 : nn2];
+            double hz = root * pow(2.0, step / 12.0);
+            voice_add(st, 22050, (int)(nn2 * 0.085 * SR), hz, 0.115, 8.5);
         }
-        char p2[64];
-        snprintf(p2, sizeof p2, "/tmp/wfx_st_%s.wav", MODESPEC[mi2].name);
+        char p2[96];
+        snprintf(p2, sizeof p2, "/tmp/wfx%d_st_%s.wav", SFX_VERSION, MODESPEC[mi2].name);
         write_wav(p2, st, 22050);
     }
     g_sfx_ready = true;
@@ -4796,7 +4805,7 @@ static void play_stinger(int mode_idx) {
     if (mode_idx < 0 || mode_idx >= NMODES) return;
     ensure_sfx();
     char p[96];
-    snprintf(p, sizeof p, "/tmp/wfx_st_%s.wav", MODESPEC[mode_idx].name);
+    snprintf(p, sizeof p, "/tmp/wfx%d_st_%s.wav", SFX_VERSION, MODESPEC[mode_idx].name);
     play_sfx(p);
 }
 
@@ -4811,8 +4820,8 @@ static long g_amb_t0 = 0;
 
 static void ambient_stop(void) {
     if (g_amb_mode >= 0)
-        system("pkill -f 'afplay /tmp/wfx_amb' >/dev/null 2>&1; "
-               "pkill -f 'aplay -q /tmp/wfx_amb' >/dev/null 2>&1;");
+        system("pkill -f 'afplay /tmp/wfx' >/dev/null 2>&1; "
+               "pkill -f 'aplay -q /tmp/wfx' >/dev/null 2>&1;");
     g_amb_mode = -1;
     g_amb_t0 = 0;
 }
@@ -4821,33 +4830,36 @@ static void ensure_ambient(int mi) {
     if (mi < 0 || mi >= NMODES) mi = g_mode_idx;
     if (mi < 0 || mi >= NMODES) return;
     char p[96];
-    snprintf(p, sizeof p, "/tmp/wfx_amb_%s.wav", MODESPEC[mi].name);
+    snprintf(p, sizeof p, "/tmp/wfx%d_amb_%s.wav", SFX_VERSION, MODESPEC[mi].name);
     FILE *probe = fopen(p, "rb");
     if (probe) { fclose(probe); return; } /* already synthesized */
     const int SR = 44100;
     int n = SR * AMBIENT_SECS;
     float *s = malloc(sizeof(float) * (size_t)n);
     if (!s) return;
-    /* pentatonic-ish roots so adjacent modes drift musically */
-    static const float roots[] = {
-        110.0f, 98.0f, 164.8f, 87.3f, 73.4f, 61.7f, 82.4f, 130.8f,
-        73.4f, 110.0f, 92.5f, 87.3f, 123.5f, 98.0f, 61.7f,
-        116.5f, 146.8f, 82.4f, 87.3f, 98.0f, 110.0f, 98.0f, 220.0f, 73.4f,
-        82.4f,
-    };
-    const size_t roots_count = sizeof roots / sizeof *roots;
-    double f = roots[(size_t)mi % roots_count];
+    /* The drone sits in the same key as the world's stinger, an octave below,
+     * with the chord voiced under it. Every LFO rate divides the loop length,
+     * so the seam stays inaudible when the file retriggers. */
+    double f = mode_hz(mi, 0);
+    int chord[4];
+    mode_arpeggio(mi, chord);
+    double fifth = f * pow(2.0, chord[2] / 12.0);
+    double colour = f * pow(2.0, chord[1] / 12.0);
     double lfo1 = 1.0 / AMBIENT_SECS, lfo2 = 3.0 / AMBIENT_SECS;
+    double lfo3 = 2.0 / AMBIENT_SECS;
     double beat = 1.0 / AMBIENT_SECS; /* detune that wraps the seam */
     for (int i = 0; i < n; i++) {
         double t = (double)i / SR;
         double env = 0.75 + 0.25 * sin(2 * M_PI * lfo1 * t) *
                      (0.8 + 0.2 * sin(2 * M_PI * lfo2 * t));
+        /* the colour tone breathes in and out so the pad is not static */
+        double swell = 0.5 + 0.5 * sin(2 * M_PI * lfo3 * t);
         double v = sin(2 * M_PI * f * t) +
-                   0.55 * sin(2 * M_PI * f * 1.5 * t + 1.3) +
+                   0.55 * sin(2 * M_PI * fifth * t + 1.3) +
                    0.30 * sin(2 * M_PI * (f * 2 + beat) * t) +
-                   0.45 * sin(2 * M_PI * f * 0.5 * t + 0.5);
-        s[i] = (float)(0.055 * env * v);
+                   0.45 * sin(2 * M_PI * f * 0.5 * t + 0.5) +
+                   0.26 * swell * sin(2 * M_PI * colour * t + 2.1);
+        s[i] = (float)(0.052 * env * v);
     }
     write_wav(p, s, n);
     free(s);
@@ -4860,7 +4872,7 @@ static void ambient_update(void) {
         ambient_stop();
         ensure_ambient(g_mode_idx);
         char p[96];
-        snprintf(p, sizeof p, "/tmp/wfx_amb_%s.wav", mode_name());
+        snprintf(p, sizeof p, "/tmp/wfx%d_amb_%s.wav", SFX_VERSION, mode_name());
         play_sfx(p);
         g_amb_mode = g_mode_idx;
         g_amb_t0 = now;
@@ -4868,7 +4880,7 @@ static void ambient_update(void) {
     }
     if (g_amb_t0 && now - g_amb_t0 > AMBIENT_MS) { /* seamless-ish retrigger */
         char p[96];
-        snprintf(p, sizeof p, "/tmp/wfx_amb_%s.wav", mode_name());
+        snprintf(p, sizeof p, "/tmp/wfx%d_amb_%s.wav", SFX_VERSION, mode_name());
         play_sfx(p);
         g_amb_t0 = now;
     }
@@ -6260,7 +6272,7 @@ static void handle_click(int btn, int px, int py) {
     if (pc64(dom_[cell]) <= 1) return;
     if (!undo_push()) { set_note("undo unavailable"); return; }
     dom_[cell] = 1ULL << weighted_pick_at(dom_[cell], cell);
-    if (propagate_from(cell)) { set_note("seeded (%d,%d)", cx, cy); if (g_sound) { ensure_sfx(); play_sfx("/tmp/wfc_blip.wav"); } }
+    if (propagate_from(cell)) { set_note("seeded (%d,%d)", cx, cy); if (g_sound) { ensure_sfx(); play_sfx(SFX_BLIP); } }
     else {
         undo_pop();
         set_note("collapse refused there");
@@ -7068,8 +7080,19 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--reset-learning")) g_thermo_reset_learning = true;
         else if (!strcmp(argv[i], "--modes")) {
-            for (int k = 0; k < NMODES; k++)
-                printf("%-9s %s\n", MODESPEC[k].name, MODESPEC[k].blurb);
+            static const char *FAMILY[] = {"field", "connector", "carve"};
+            static const char *NOTE[12] = {"A", "A#", "B", "C", "C#", "D",
+                                           "D#", "E", "F", "F#", "G", "G#"};
+            for (int k = 0; k < NMODES; k++) {
+                /* the drone root: A2 is 110 Hz, so tone 0 reads as A2 */
+                int tone = MODESPEC[k].tone;
+                int semi = ((tone % 12) + 12) % 12;
+                int octave = 2 + (tone - semi) / 12;
+                char key[8];
+                snprintf(key, sizeof key, "%s%d", NOTE[semi], octave);
+                printf("%-9s %-9s %-4s %s\n", MODESPEC[k].name,
+                       FAMILY[MODESPEC[k].group], key, MODESPEC[k].blurb);
+            }
             return 0;
         }
         else if (!strcmp(argv[i], "--density")) {
@@ -7563,7 +7586,7 @@ inf_continue:
         if (g_stop || g_once) break;
         if (r == 1) { /* solved */
             if (getenv("WFC_DEBUG")) { FILE *df=fopen("/tmp/wfc_dbg.log","a"); if(df){fprintf(df,"[solved inf=%d size %dx%d]\n",(int)g_inf,W_,H_); fclose(df);} }
-            if (g_sound) { ensure_sfx(); play_sfx("/tmp/wfc_done.wav"); }
+            if (g_sound) { ensure_sfx(); play_sfx(SFX_DONE); }
             int is_terrain = !strcmp(mode_name(), "terrain");
             load_world(0);
             quality_record(quality_measure(true));

@@ -1,10 +1,14 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sandbox  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "wfc"
@@ -17,9 +21,7 @@ class QualityStudioTests(unittest.TestCase):
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def run_wfc(self, *args, env=None):
-        merged = os.environ.copy()
-        if env:
-            merged.update(env)
+        merged = sandbox.env(**(env or {}))
         return subprocess.run([os.fspath(BINARY), *args], cwd=ROOT,
                               env=merged, capture_output=True, text=True,
                               timeout=10)
@@ -166,6 +168,25 @@ class QualityStudioTests(unittest.TestCase):
         for name, line in zip(names, lines):
             self.assertTrue(line.startswith(name), line)
             self.assertGreater(len(line[len(name):].strip()), 8, "blurb missing")
+
+    def test_every_world_has_its_own_key_and_family(self):
+        """Sound is derived from (key, family); a shared pair means twins.
+
+        Two hand-kept tables of twenty-five used to drive the stingers and
+        drones, indexed `mode % 25`, so the eight worlds past the twenty-fifth
+        played another world's music outright.
+        """
+        rows = [l.split() for l in self.run_wfc("--modes").stdout.splitlines() if l.strip()]
+        names = self.run_wfc("--list-modes").stdout.split()
+        self.assertEqual(len(rows), len(names))
+        seen = {}
+        for row in rows:
+            name, family, key = row[0], row[1], row[2]
+            self.assertIn(family, {"field", "connector", "carve"}, name)
+            self.assertRegex(key, r"^[A-G]#?[0-9]$", name)
+            self.assertNotIn((family, key), seen,
+                             "%s sounds like %s" % (name, seen.get((family, key))))
+            seen[(family, key)] = name
 
     def test_density_flag_is_range_checked(self):
         self.assertEqual(self.run_wfc("--density", "50", "--mode", "streets",

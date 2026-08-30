@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -30,9 +31,11 @@ def run_case(binary, mode, solver, trial, width, height, profile_dir):
         args.append("--no-learn")
     started = time.monotonic()
     try:
+        env = os.environ.copy()
+        env["HOME"] = profile_dir          # never touch the user's ~/.wfcrc
         result = subprocess.run(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=30,
+            text=True, timeout=30, env=env,
         )
         elapsed_ms = (time.monotonic() - started) * 1000.0
     except subprocess.TimeoutExpired as error:

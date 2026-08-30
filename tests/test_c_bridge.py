@@ -1,10 +1,14 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sandbox  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "wfc"
@@ -19,8 +23,7 @@ class CBridgeTests(unittest.TestCase):
                        stderr=subprocess.PIPE, text=True)
 
     def run_wfc(self, worker, *extra, profile_dir=None):
-        env = os.environ.copy()
-        env["WFC_THERMO_PY"] = os.fspath(worker)
+        env = sandbox.env(WFC_THERMO_PY=os.fspath(worker))
         args = [os.fspath(BINARY), "--mode", "circuit", "--solver", "thermo",
                 "--once", "--w", "6", "--h", "4", "--seed", "7"]
         if profile_dir is not None:
@@ -37,9 +40,8 @@ class CBridgeTests(unittest.TestCase):
         self.assertNotIn("thermo failed", result.stderr)
 
     def test_c_rejects_worker_completion_that_breaks_hard_edges(self):
-        env = os.environ.copy()
-        env["WFC_THERMO_PY"] = os.fspath(FAKE_WORKER)
-        env["FAKE_INVALID_DONE"] = "1"
+        env = sandbox.env(WFC_THERMO_PY=os.fspath(FAKE_WORKER),
+                          FAKE_INVALID_DONE="1")
         result = subprocess.run(
             [os.fspath(BINARY), "--mode", "circuit", "--solver", "thermo",
              "--once", "--w", "6", "--h", "4", "--seed", "7"],
@@ -83,9 +85,8 @@ class CBridgeTests(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "feedback.jsonl"
-            env = os.environ.copy()
-            env["WFC_THERMO_PY"] = os.fspath(FAKE_WORKER)
-            env["FAKE_FEEDBACK_LOG"] = os.fspath(log)
+            env = sandbox.env(WFC_THERMO_PY=os.fspath(FAKE_WORKER),
+                              FAKE_FEEDBACK_LOG=os.fspath(log))
             result = subprocess.run(
                 [os.fspath(BINARY), "--mode", "circuit", "--solver", "thermo",
                  "--once", "--w", "8", "--h", "6", "--seed", "7"],

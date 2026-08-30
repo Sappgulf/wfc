@@ -84,7 +84,7 @@ Mouse: left-click seed, right-click carve or unpin, drag paint, hover inspect.
 --report out.json       quality, thermo, and studio observatory report
 --gallery out.html  all-mode web showcase
 --collage out.png    mosaic of all worlds
---modes              every world with its one-line design note
+--modes              every world with its family, musical key and design note
 --density N          how full a world packs, 4-96 (same as [ ])
 --bench      performance table
 --evolve N   rank 2-8 deterministic variants (classic single-world)
@@ -160,7 +160,15 @@ remembered in `~/.wfcrc`.
 records *across* the morphs and writes one seamless loop when you quit —
 the dissolve itself is in the gif.
 
+Every world has its own key and family, listed by `--modes`. The drone, the
+mode stinger and the click blip are all synthesized from those two fields, so
+a new world arrives with music of its own rather than borrowing another's.
+Field worlds open out on a major shape, connector lattices move in fourths and
+fifths, carved worlds sit in a descending minor.
+
 Environmental memory: `~/.wfcrc` remembers mode/theme/speed/density/audio/CRT.
+The test suite points `HOME` at a scratch directory, so running it never reads
+or rewrites your settings.
 
 ## The thermodynamic solver
 
