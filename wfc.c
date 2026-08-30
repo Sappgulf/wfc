@@ -4508,9 +4508,11 @@ static void render_status(int vh, int ch) {
     char core[160], line[256];
     const char *mode = MODES[g_mode_idx];
     if (g_thermo) {
-        const char *engine = thermo_ready_ ? thermo_sampler_ : "boot";
+        const char *engine = thermo_ready_ ? thermo_sampler_ :
+                             thermo_inflight_ ? "boot" :
+                             pct == 100 ? "done" : "idle";
         const char *learning = g_thermo_learn ? "learn" : "ephem";
-        if (thermo_quality_ > 0.0) {
+        if (thermo_quality_ > 0.0 && g_quality_live >= 0.0) {
             snprintf(core, sizeof core, "%s %3d%% | T/%s q%.2f o%ld %s",
                      mode, pct, engine, thermo_quality_, thermo_observations_, learning);
         } else {
