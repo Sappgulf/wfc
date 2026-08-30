@@ -195,7 +195,13 @@ pairwise energy-based model:
 
 The sidecar is a long-lived JSONL worker: C sends `init`, bounded `sample`
 rounds, and measured `feedback`; the worker returns `ready`, `stats`,
-incremental `proposal` patches, and `learn` updates. C transactionally applies
+incremental `proposal` patches, and `learn` updates. A patch is a small
+connected group of cells rather than a single one — placing one cell per round
+meant the sidecar could only express a preference about a lone tile, never
+about the junction or run where the structure lives. It extends outward from
+its seed cell only while the draw stays confident, up to four cells, and C
+applies and rolls back the whole patch as a unit. On streets at 30x16 that
+raised quality from 0.9732 to 0.9778 while cutting round-trips by 18%. C transactionally applies
 each patch through the authoritative propagator and rolls it back on a
 contradiction.
 

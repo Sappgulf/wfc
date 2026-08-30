@@ -883,13 +883,69 @@ class ThermoSession:
         if choice is None:
             return None
         tile, score, context = choice
-        return {
+        picks = [{
             "i": chosen_index,
             "tile": tile,
             "p": round(float(confidence), 6),
             "score": round(float(score), 6),
             "context": context,
-        }
+        }]
+        picks.extend(self._extend(domains, picks[0], beta))
+        return picks
+
+    def _extend(self, domains, first, beta):
+        """Grow the proposal outward from the first cell.
+
+        A round used to place exactly one cell, which meant the sidecar could
+        only ever express a preference about a single tile — never about a
+        junction, a corner or a run, which is where the structure it is
+        supposed to be learning actually lives. It now offers a small
+        connected patch, and because C applies the whole thing through its own
+        propagator and rolls it back as a unit, an over-reach costs a round
+        rather than the grid.
+
+        The extension is deliberately conservative: only cells adjacent to
+        what has already been placed, only while the draw stays confident,
+        and never more than PATCH_MAX cells in total.
+        """
+        PATCH_MAX = 4
+        CONFIDENT = 0.55
+        if first["p"] < CONFIDENT:
+            return []                     # unsure about the seed: place it alone
+        local = list(domains)
+        local[first["i"]] = 1 << first["tile"]
+        placed = [first["i"]]
+        extra = []
+        while len(placed) + 1 <= PATCH_MAX:
+            best = None
+            for cell in placed:
+                for neighbor, _direction in self._neighbors(cell):
+                    if _singleton_tile(local[neighbor]) >= 0:
+                        continue
+                    if any(item["i"] == neighbor for item in extra):
+                        continue
+                    options = self._candidate_options(local, neighbor)
+                    if not options:
+                        continue
+                    choice, confidence = self._choice(options, beta)
+                    if choice is None or confidence < CONFIDENT:
+                        continue
+                    if best is None or confidence > best[1]:
+                        best = ((neighbor, choice), confidence)
+            if best is None:
+                break
+            (neighbor, choice), confidence = best
+            tile, score, context = choice
+            local[neighbor] = 1 << tile
+            placed.append(neighbor)
+            extra.append({
+                "i": neighbor,
+                "tile": tile,
+                "p": round(float(confidence), 6),
+                "score": round(float(score), 6),
+                "context": context,
+            })
+        return extra
 
     def _save(self):
         if self.learn and self.profile_path:
@@ -948,7 +1004,7 @@ class ThermoSession:
         beta = max(0.05, min(24.0, beta_target * self.beta_scale))
         self.round += 1
         proposal = self._proposal(domains, budget, beta)
-        if proposal is None:
+        if not proposal:
             raise ValueError("no locally safe proposal; classic solver should take over")
         bad = self._partial_bad(domains)
         emit({
@@ -958,7 +1014,7 @@ class ThermoSession:
             "beta": round(beta, 6),
             "energy": round(self._energy(domains), 6),
             "bad": bad,
-            "confidence": proposal["p"],
+            "confidence": proposal[0]["p"],
             "reward": self.state["quality_history"][-1] if self.state["quality_history"] else 0.0,
             "observations": self.state["observations"],
             "sampler": self.sampler,
@@ -968,7 +1024,7 @@ class ThermoSession:
             "v": 1,
             "t": "proposal",
             "round": self.round,
-            "patch": [proposal],
+            "patch": proposal,
             "beta": round(beta, 6),
             "energy": round(self._energy(domains), 6),
             "bad": bad,

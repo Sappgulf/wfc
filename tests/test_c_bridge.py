@@ -109,6 +109,38 @@ class CBridgeTests(unittest.TestCase):
         self.assertTrue(all(f["margin"] < 0 for f in displaced))
         self.assertTrue(all(f["reward"] < 0 for f in displaced))
 
+    def test_worker_proposes_connected_patches_not_single_cells(self):
+        """A round should be able to express a junction, not just one tile.
+
+        Placing exactly one cell per round meant the sidecar could only ever
+        have an opinion about a single tile, never about the corner or run
+        where the structure it is learning actually lives.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "feedback.jsonl"
+            env = sandbox.env(WFC_THERMO_PY=os.fspath(REAL_WORKER),
+                              FAKE_FEEDBACK_LOG=os.fspath(log))
+            result = subprocess.run(
+                [os.fspath(BINARY), "--mode", "streets", "--solver", "thermo",
+                 "--once", "--w", "16", "--h", "10", "--seed", "7",
+                 "--thermo-profile", tmp],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(subprocess.run(
+                [os.fspath(BINARY), "--mode", "streets", "--solver", "thermo",
+                 "--once", "--w", "16", "--h", "10", "--seed", "7",
+                 "--thermo-profile", tmp, "--report", os.fspath(Path(tmp) / "r.json")],
+                cwd=ROOT, env=env, capture_output=True, text=True,
+                timeout=30).returncode == 0 and
+                (Path(tmp) / "r.json").read_text(encoding="utf-8"))
+
+        thermo = report["thermo"]
+        self.assertGreater(thermo["proposals"], thermo["round"],
+                           "patches must carry more than one cell per round")
+        self.assertEqual(thermo["accepted"] + thermo["rejected"],
+                         thermo["proposals"])
+
     def test_real_worker_persists_and_no_learn_is_ephemeral(self):
         with tempfile.TemporaryDirectory() as profile_dir:
             result = self.run_wfc(REAL_WORKER, profile_dir=profile_dir)
