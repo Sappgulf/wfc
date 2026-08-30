@@ -48,7 +48,8 @@ make
 | loom     | warp and weft crossing over and under on the web |
 
 Press `/` to open the world picker — type to filter, arrows to move, enter to
-go. `m` steps to the next world, `z` shows the all-worlds sheet, `r` the
+go. It previews the highlighted world as a live thumbnail, so you choose by
+looking rather than by reading a name. `m` steps to the next world, `z` shows the all-worlds sheet, `r` the
 raytraced heightfield view, `i` the isometric relief view of any solved world.
 
 ## Keys
@@ -121,7 +122,8 @@ candidate, scores the complete quality vector, and restores the winning map.
 The equivalent headless command is `--evolve 4`; it prints ranked scores and
 leaves the winner active for `--save` or `--report`.
 
-Seven field worlds — galaxy, geode, stained, solar, storm, glacier and koi —
+Ten field worlds — galaxy, geode, stained, solar, storm, glacier, koi, waves,
+mondrian and matrix —
 seed their domains from bilinear value noise on a coarse lattice rather than
 letting a smoothed band field random-walk. Broad forms (nebula clouds, crystal
 veins, whole panes of glass) come from that prior; detail and every hard
@@ -253,7 +255,7 @@ automation. For a deeper local experiment, run
 
 `make check` is the gate: pedantic build, all 25 modes, seed/argument/export
 regressions, the Python protocol, bridge and learner suites, the quality
-benchmark, a 198-combo sanitizer sweep of every mode against every render
+benchmark, a pty-driven pass over the live TUI, a 198-combo sanitizer sweep of every mode against every render
 toggle (`make sweep`), and a randomized ASan fuzz (`make fuzz`). The whole
 thing runs in about 25 seconds.
 
@@ -267,6 +269,8 @@ thing runs in about 25 seconds.
 - `--bench` prints a per-mode performance table
 - `make quality-benchmark` compares quality-directed solver paths
 - `make sweep` runs every mode against every render toggle under ASan+UBSan
+- `make interactive-check` drives the live TUI through a pty: picker, keys,
+  escape sequences, quit
 
 ~6,900 lines of C, ~1,600 lines of Python. `cc -O2 -std=c11 -o wfc wfc.c -lz`
 if you hate make.

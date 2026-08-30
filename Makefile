@@ -47,7 +47,8 @@ regression: wfc
 python-check:
 	@python3 -m py_compile wfc_learning.py wfc_thermo.py tests/fake_thermo.py \
 		tests/test_wfc_learning.py tests/test_protocol_contract.py tests/test_c_bridge.py \
-		tests/test_quality_studio.py tests/quality_benchmark.py tests/test_quality_benchmark.py
+		tests/test_quality_studio.py tests/quality_benchmark.py tests/test_quality_benchmark.py \
+		tests/test_interactive.py
 	@echo 'python: syntax OK'
 
 protocol-check:
@@ -72,6 +73,10 @@ quality-check: wfc
 
 studio-check: wfc
 	@python3 -m unittest tests.test_quality_studio -v
+
+# the live TUI, driven through a pty: keys, overlays, escape sequences
+interactive-check: wfc
+	@python3 -m unittest tests.test_interactive -v
 
 studio-c-check:
 	@cc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
@@ -117,7 +122,7 @@ fuzz: wfc_asan
 # everything a change has to survive before it lands
 check: strict test regression python-check protocol-check bridge-check \
        learning-check quality-check studio-check studio-c-check \
-       quality-benchmark sweep fuzz
+       interactive-check quality-benchmark sweep fuzz
 	@echo "check: all suites clean"
 
 clean:
@@ -126,4 +131,4 @@ clean:
 install: wfc
 	install -m 0755 wfc /usr/local/bin/wfc
 
-.PHONY: check clean install asan strict debug test regression python-check protocol-check bridge-check learning-check quality-check studio-check studio-c-check quality-benchmark sweep fuzz
+.PHONY: check clean install asan strict debug test regression python-check protocol-check bridge-check learning-check quality-check studio-check studio-c-check interactive-check quality-benchmark sweep fuzz

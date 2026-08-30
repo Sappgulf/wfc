@@ -117,15 +117,15 @@ static const ModeSpec MODESPEC[] = {
     {"terrain",  "hillshaded biomes + carved rivers + day cycle",   build_terrain,  true,  true,  true,  false, false, false, false, MG_FIELD,     260},
     {"truchet",  "woven arcs with a travelling light pulse",        build_truchet,  false, false, false, false, false, false, false, MG_CONNECTOR, 500},
     {"fire",     "living flames with rising embers",                build_fire,     true,  false, true,  true,  false, false, false, MG_FIELD,      90},
-    {"waves",    "rolling ocean, crest lines, moonpath",            build_waves,    true,  true,  true,  false, false, false, false, MG_FIELD,     160},
+    {"waves",    "rolling ocean, crest lines, moonpath",            build_waves,    true,  true,  true,  false, false, false, true,  MG_FIELD,     160},
     {"dungeon",  "torch-lit catacombs with breathing warmth",       build_dungeon,  false, true,  false, false, false, false, false, MG_CARVE,     220},
     {"maze",     "labyrinth with wall pulses",                      build_maze,     false, true,  false, false, false, false, false, MG_CARVE,     360},
     {"galaxy",   "nebulae with shooting stars",                     build_galaxy,   true,  true,  true,  false, false, false, true,  MG_FIELD,     100},
     {"city",     "night skylines with beacons + rain",              build_city,     true,  false, true,  true,  false, false, false, MG_FIELD,     400},
     {"aurora",   "drifting green curtains over stars",              build_aurora,   true,  false, true,  true,  true, false, false,  MG_FIELD,     150},
-    {"matrix",   "digital rain with white-hot glyph heads",         build_matrix,   true,  true,  true,  false, false, false, false, MG_FIELD,     140},
+    {"matrix",   "digital rain with white-hot glyph heads",         build_matrix,   true,  true,  true,  false, false, false, true,  MG_FIELD,     140},
     {"pipes",    "water pressure networks, pulses racing runs",     build_pipes,    false, true,  false, false, false, false, false, MG_CONNECTOR, 180},
-    {"mondrian", "painted plazas split by charcoal rules",          build_mondrian, true,  true,  true,  false, false, false, false, MG_FIELD,     400},
+    {"mondrian", "painted plazas split by charcoal rules",          build_mondrian, true,  true,  true,  false, false, false, true,  MG_FIELD,     400},
     {"koi",      "pond bands, koi gliding between lily pads",       build_koi,      true,  true,  true,  false, false, false, true,  MG_FIELD,     250},
     {"lava",     "crusting basalt over a molten breath",            build_lava,     true,  false, true,  true,  true, false, false,  MG_FIELD,     130},
     {"sakura",   "spring night, blossom petals drifting down",      build_sakura,   true,  false, true,  true,  false, false, false, MG_FIELD,     120},
@@ -4236,6 +4236,7 @@ static bool gallery_solve(int mode_idx, uint64_t seed, int w, int h) {
 /* solve every mode tiny; cache one color per cell */
 static RGB sheet_cell[NMODES][48][24];
 static int sheet_w[NMODES], sheet_h[NMODES];
+static bool sheet_ready_ = false;   /* sheet_cell[] holds solved previews */
 static void sheet_scan(void) {
     /* Snapshot the live world so preview generation is observational. */
     int ow = W_, oh = H_, saved_mode = g_mode_idx;
@@ -4284,6 +4285,7 @@ static void sheet_scan(void) {
                 sheet_cell[mi][y][x] = c;
             }
     }
+    sheet_ready_ = true;
     setup_mode(saved_mode);
     g_seed = saved_seed;
     rs_ = saved_rs;
@@ -5780,16 +5782,48 @@ static void render_picker(void) {
         if (first < 0) first = 0;
         if (first > n - rows) first = n - rows;
     }
+    /* leave room for the preview when the terminal is wide enough for it */
+    int pw = n ? sheet_w[hits[g_picker_sel]] : 0;
+    bool preview = sheet_ready_ && pw > 0 && trows > 12 &&
+                   ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 &&
+                   ws.ws_col >= 34 + pw * 2;
+    int blurb = preview ? (int)ws.ws_col - 26 - pw * 2 : 46;
+    if (blurb > 46) blurb = 46;
+    if (blurb < 8) blurb = 8;
+    int listrow = 6;
     for (int k = first; k < n && k < first + rows; k++) {
         const ModeSpec *m = &MODESPEC[hits[k]];
         bool sel = k == g_picker_sel, cur = hits[k] == g_mode_idx;
+        char note[80];
+        snprintf(note, sizeof note, "%.*s", blurb, m->blurb);
         fb_fg(sel ? (RGB){20, 24, 30} : cur ? (RGB){245, 200, 90} : (RGB){206, 214, 226});
-        if (sel) { snprintf(line, sizeof line, "\x1b[48;2;150;232;255m"); fb_puts(line); }
-        snprintf(line, sizeof line, " %s %-9s %-46s ",
-                 cur ? "\xe2\x97\x8f" : " ", m->name, m->blurb);
+        if (sel) fb_puts("\x1b[48;2;150;232;255m");
+        snprintf(line, sizeof line, " %s %-9s %-*s ",
+                 cur ? "\xe2\x97\x8f" : " ", m->name, blurb, note);
         fb_puts(line);
         if (sel) fb_puts("\x1b[49m");
         fb_puts("\n");
+        listrow++;
+    }
+    if (preview) {
+        /* the same solved previews the all-worlds sheet uses, so choosing a
+         * world is a matter of looking at it rather than reading its name */
+        int mi = hits[g_picker_sel];
+        int ph = sheet_h[mi];
+        int col = 16 + blurb + 6;
+        for (int y = 0; y + 1 < ph; y += 2) {
+            snprintf(line, sizeof line, "\x1b[%d;%dH", 6 + y / 2, col);
+            fb_puts(line);
+            for (int x = 0; x < sheet_w[mi]; x++)
+                fb_half(sheet_cell[mi][y][x], sheet_cell[mi][y + 1][x]);
+        }
+        fb_puts("\x1b[0m");
+        snprintf(line, sizeof line, "\x1b[%d;%dH", 6 + ph / 2, col);
+        fb_puts(line);
+        fb_fg((RGB){120, 132, 148});
+        fb_puts(MODESPEC[mi].name);
+        snprintf(line, sizeof line, "\x1b[%d;1H", listrow);
+        fb_puts(line);
     }
     fb_fg((RGB){120, 132, 148});
     snprintf(line, sizeof line,
@@ -6459,7 +6493,17 @@ static int pump_keys(bool tty) {
             else mouse_esc = 0;
             continue;
         }
-        if (c == 0x1b) { mouse_esc = 1; mouse_len = 0; continue; }
+        if (c == 0x1b) {
+            /* A lone ESC has to act immediately. Waiting for the byte that
+             * would complete a CSI meant Esc did nothing at all until some
+             * other key happened along — the picker would not close. Nothing
+             * readable within a frame means the user pressed Escape. */
+            struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN, .revents = 0};
+            if (poll(&pfd, 1, 25) <= 0) { key = KEY_ESC; c = 0; goto dispatch; }
+            mouse_esc = 1;
+            mouse_len = 0;
+            continue;
+        }
         }
     dispatch:
         (void)key;
@@ -6561,6 +6605,7 @@ static int pump_keys(bool tty) {
             g_picker = true;
             g_picker_query[0] = 0;
             g_picker_sel = g_mode_idx;
+            if (!sheet_ready_) sheet_scan();   /* one small solve per world */
             full_repaint_ = true;
             continue;
         }
