@@ -9,7 +9,7 @@ make
 ./wfc
 ```
 
-## The thirty worlds
+## The thirty-three worlds
 
 | mode     | design                                           |
 |----------|--------------------------------------------------|
@@ -43,6 +43,9 @@ make
 | bamboo   | swaying stalks and nodes under a lit canopy      |
 | solar    | granulated photosphere, sunspots, arcing flares  |
 | rail     | marshalling yard, running trains, switch lamps   |
+| canyon   | banded strata, a river cut, dust in the light    |
+| vinyl    | concentric grooves under a sweeping highlight    |
+| loom     | warp and weft crossing over and under on the web |
 
 Press `m` to cycle, `z` for the all-worlds sheet, `r` for the raytraced
 heightfield view, `i` for the isometric relief view of any solved world.
@@ -222,7 +225,7 @@ Albedo comes from the active mode's palette (ray-traced fires, nebulae, seas).
 ## Benchmark lab
 
 `make quality-benchmark` runs a bounded comparison across streets, neurons,
-mycelium, and delta using classic, thermo-ephemeral (`--no-learn`), and
+mycelium, delta, and rail using classic, thermo-ephemeral (`--no-learn`), and
 thermo-learned (isolated temporary profile) paths. It prints solve success,
 weighted quality, and milliseconds, followed by one JSON line suitable for
 automation. For a deeper local experiment, run
@@ -232,11 +235,11 @@ automation. For a deeper local experiment, run
 
 `make check` is the gate: pedantic build, all 25 modes, seed/argument/export
 regressions, the Python protocol, bridge and learner suites, the quality
-benchmark, a 180-combo sanitizer sweep of every mode against every render
+benchmark, a 198-combo sanitizer sweep of every mode against every render
 toggle (`make sweep`), and a randomized ASan fuzz (`make fuzz`). The whole
 thing runs in about 25 seconds.
 
-- 30/30 modes solve first-try across seed sweeps
+- 33/33 modes solve first-try across seed sweeps
 - AddressSanitizer + UBSan clean on solver, exports, all interactive paths
   (`make asan`, then `./wfc_asan --mode <m> --once --save out.png`; pty via
   `script -q /dev/null ./wfc_asan ...` for the interactive paths)

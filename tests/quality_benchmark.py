@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 
-MODES = ("streets", "neurons", "mycelium", "delta")
+MODES = ("streets", "neurons", "mycelium", "delta", "rail")
 SOLVERS = ("classic", "thermo-ephemeral", "thermo-learned")
 
 

@@ -24,7 +24,7 @@ class QualityBenchmarkTests(unittest.TestCase):
             "classic", "thermo-ephemeral", "thermo-learned",
         })
         self.assertEqual({item["mode"] for item in payload["results"]},
-                         {"streets", "neurons", "mycelium", "delta"})
+                         {"streets", "neurons", "mycelium", "delta", "rail"})
         self.assertTrue(all(item["success"] for item in payload["results"]))
 
 

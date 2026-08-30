@@ -85,6 +85,9 @@ static void build_glacier(void);
 static void build_bamboo(void);
 static void build_solar(void);
 static void build_rail(void);
+static void build_canyon(void);
+static void build_vinyl(void);
+static void build_loom(void);
 
 enum {              /* which family apply_bias() tilts */
     MG_FIELD = 0,       /* band worlds: tilt along band order */
@@ -138,6 +141,9 @@ static const ModeSpec MODESPEC[] = {
     {"bamboo",   "swaying stalks and nodes under a lit canopy",      build_bamboo,   true,  false, true,  true,  false, false, MG_FIELD,     130},
     {"solar",    "granulated photosphere, sunspots, arcing flares",  build_solar,    true,  true,  true,  false, false, false, MG_FIELD,     100},
     {"rail",     "marshalling yard, running trains, switch lamps",   build_rail,     false, false, false, false, false, true,  MG_CONNECTOR, 155},
+    {"canyon",   "banded strata, a river cut, dust in the light",    build_canyon,   true,  false, true,  true,  false, false, MG_FIELD,     240},
+    {"vinyl",    "concentric grooves under a sweeping highlight",    build_vinyl,    true,  true,  true,  false, false, false, MG_FIELD,      90},
+    {"loom",     "warp and weft crossing over and under on the web", build_loom,     false, false, false, false, false, false, MG_CONNECTOR, 320},
 };
 #define NMODES ((int)(sizeof MODESPEC / sizeof *MODESPEC))
 static int g_mode_idx = 0;
@@ -320,6 +326,12 @@ static void build_mycelium(void) {
 /* delta: long channels dominate, with occasional confluences and sandbars */
 static void build_delta(void) {
     static const double weights[14] = {18, 16, 16, 10, 10, 10, 10, 9, 7, 1.8, 1.8, 1.0, 1.0, 0.9};
+    build_connector_world(weights);
+}
+/* loom: cloth on the web — long warp and weft runs that mostly cross rather
+ * than turn, so the lattice reads as weave instead of circuitry. */
+static void build_loom(void) {
+    static const double weights[14] = {3, 40, 40, 1.6, 1.6, 1.6, 1.6, 4, 4, 0.4, 0.4, 0.4, 0.4, 11};
     build_connector_world(weights);
 }
 /* rail: a marshalling yard — long parallel runs, sparing points work, and
@@ -531,6 +543,16 @@ static void build_glacier(void) {
 /* bamboo: stand density bands; open floor below a closed canopy */
 static void build_bamboo(void) {
     static const double w[8] = {6, 8, 10, 11, 11, 10, 8, 6};
+    build_band_world(w);
+}
+/* canyon: strata bands, thickest through the middle of the wall */
+static void build_canyon(void) {
+    static const double w[8] = {6, 8, 10, 12, 12, 10, 8, 6};
+    build_band_world(w);
+}
+/* vinyl: groove-depth bands, near-flat so the rings carry the image */
+static void build_vinyl(void) {
+    static const double w[8] = {9, 9, 10, 11, 11, 10, 9, 8};
     build_band_world(w);
 }
 /* solar: photosphere brightness bands; granules dominate, spots are rare */
@@ -1674,6 +1696,18 @@ static const RGB SOLARPAL[8] = {
     {58, 10, 2}, {108, 22, 3}, {158, 44, 4}, {204, 78, 8},
     {236, 120, 18}, {250, 168, 46}, {255, 212, 112}, {255, 246, 198},
 };
+static const RGB CANYONPAL[8] = {
+    {26, 17, 15}, {61, 31, 21}, {103, 53, 29}, {145, 79, 39},
+    {181, 109, 57}, {211, 145, 85}, {233, 185, 131}, {247, 221, 185},
+};
+static const RGB VINYLPAL[8] = {
+    {7, 7, 9}, {15, 15, 18}, {25, 25, 29}, {37, 37, 43},
+    {51, 51, 59}, {69, 69, 79}, {95, 95, 107}, {139, 139, 155},
+};
+static const RGB LOOMPAL[8] = {
+    {17, 13, 11}, {53, 33, 25}, {95, 57, 39}, {139, 87, 53},
+    {175, 123, 73}, {205, 163, 109}, {227, 199, 157}, {241, 227, 203},
+};
 static const RGB RAILPAL[8] = {
     {12, 13, 16}, {24, 26, 31}, {40, 43, 49}, {60, 64, 72},
     {88, 94, 104}, {124, 131, 143}, {168, 176, 188}, {216, 224, 234},
@@ -1683,6 +1717,7 @@ static const RGB DELTAPAL[8] = {
     {16, 126, 126}, {38, 158, 142}, {104, 190, 156}, {210, 224, 180},
 };
 static RGB network_bg(const char *mode) {
+    if (!strcmp(mode, "loom")) return (RGB){14, 11, 9};
     if (!strcmp(mode, "rail")) return (RGB){9, 9, 11};
     if (!strcmp(mode, "streets")) return (RGB){7, 10, 16};
     if (!strcmp(mode, "neurons")) return (RGB){6, 3, 16};
@@ -1714,6 +1749,22 @@ static RGB network_color(const char *mode, int tile, int cx, int cy, double puls
         double action = 0.72 + 0.28 * sin(now_ms() * 0.006 + cx * 0.91 + cy * 1.37);
         if (degree >= 3) c = lerp(c, (RGB){255, 150, 230}, 0.22);
         return scalec(c, pulse * action);
+    }
+    if (!strcmp(mode, "loom")) {
+        /* warp runs down the web, weft across it; at a crossing one thread
+         * lies over the other, and that alternation is the weave. */
+        bool warp = tiles_[tile].e[0] || tiles_[tile].e[2];
+        bool weft = tiles_[tile].e[1] || tiles_[tile].e[3];
+        bool over = ((cx + cy) & 1) == 0;
+        int band = warp && weft ? (over ? 6 : 3) : warp ? 5 : 4;
+        RGB c = LOOMPAL[band];
+        /* a few dyed threads run the length of the cloth */
+        if (warp && hash3((uint32_t)cx, 1, 6161) % 9 == 0)
+            c = lerp(c, (RGB){186, 74, 92}, 0.5);
+        else if (weft && hash3((uint32_t)cy, 2, 6161) % 11 == 0)
+            c = lerp(c, (RGB){74, 122, 162}, 0.45);
+        double sheen = 0.88 + 0.12 * sin(now_ms() * 0.0006 + cx * 0.3 + cy * 0.2);
+        return scalec(c, pulse * sheen);
     }
     if (!strcmp(mode, "rail")) {
         /* cold steel over dark ballast, with a service running the network:
@@ -2312,7 +2363,7 @@ static void zen_capture(void) {
 
 static void paint_cell(int wx, int wy, int sub, double pulse) {
     const char *mode = mode_name();
-    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_truchet = !strcmp(mode, "truchet"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta"), m_storm = !strcmp(mode, "storm"), m_glacier = !strcmp(mode, "glacier"), m_bamboo = !strcmp(mode, "bamboo"), m_solar = !strcmp(mode, "solar"), m_rail = !strcmp(mode, "rail");
+    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_truchet = !strcmp(mode, "truchet"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta"), m_storm = !strcmp(mode, "storm"), m_glacier = !strcmp(mode, "glacier"), m_bamboo = !strcmp(mode, "bamboo"), m_solar = !strcmp(mode, "solar"), m_rail = !strcmp(mode, "rail"), m_canyon = !strcmp(mode, "canyon"), m_vinyl = !strcmp(mode, "vinyl"), m_loom = !strcmp(mode, "loom");
     bool braille = !m_terrain;
             if (g_entropy_view && pc64(dom_[IDX(wx, wy)]) > 1) {
                 int k2 = pc64(dom_[IDX(wx, wy)]);
@@ -2437,7 +2488,7 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                                         col = lerp(CITYPAL[band], (RGB){255, 60, 50},
                                                    0.4 + 0.6 * bl2);
                                 }
-                            } else if (m_streets || m_neurons || m_mycelium || m_delta || m_rail) {
+                            } else if (m_streets || m_neurons || m_mycelium || m_delta || m_rail || m_loom) {
                                 bool netpx[8][8];
                                 art_circuit(t, netpx);
                                 bits = 0;
@@ -2742,6 +2793,59 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                                         bits = (uint8_t)((h & 0x66) | 0x81);
                                     }
                                 }
+                            } else if (m_canyon || m_vinyl) {
+                                int band = tiles_[t].e[0] >> 4;
+                                double tsec = now_ms() * 0.001;
+                                uint32_t h = hash3((uint32_t)(cx * 43 + chi),
+                                                   (uint32_t)(cy * 47 + sub * 3), 55);
+                                if (m_canyon) {
+                                    /* each stratum keeps its own hard tone — a bedding
+                                     * plane shades where one layer meets the next, and
+                                     * the river runs the floor of the cut */
+                                    uint32_t sh = hash3((uint32_t)band, 3, 21);
+                                    bits = (uint8_t)(0xFFu ^ ((h & 0x11u) & (sh & 0xFFu)));
+                                    col = scalec(CANYONPAL[band], pulse * (0.93 + (sh % 15) * 0.01));
+                                    if (elev_of_cell(wx, (cy + H_ - 1) % H_) != band)
+                                        col = scalec(col, sub == 0 ? 0.72 : 1.12);
+                                    if (cy >= H_ - 2) {
+                                        col = scalec(lerp(CANYONPAL[1], (RGB){30, 74, 96}, 0.75),
+                                                     pulse);
+                                        if ((wx * 5 + (int)(tsec * 6)) % 17 < 2)
+                                            col = scalec((RGB){126, 176, 196}, pulse);
+                                    } else if (!g_no_weather &&
+                                               hash3((uint32_t)wx, (uint32_t)cy,
+                                                     (uint32_t)(now_ms() / 600)) % 337 == 11) {
+                                        /* dust turning in a shaft of light */
+                                        bits = BRAILLE_BIT[h & 3][(h >> 2) & 1];
+                                        col = scalec((RGB){255, 236, 196}, pulse);
+                                    }
+                                } else {
+                                    /* a record: concentric grooves cut from the rim
+                                     * in to the label, under a highlight that sweeps */
+                                    double ddx = (wx - W_ / 2.0) * 0.5;
+                                    double ddy = (cy - H_ / 2.0);
+                                    double rad = sqrt(ddx * ddx + ddy * ddy);
+                                    double edge = (H_ < W_ ? H_ : W_) * 0.5;
+                                    int groove = (int)(rad * 2.4) & 1;
+                                    bits = groove ? 0x33 : 0xFF;
+                                    col = scalec(VINYLPAL[clampb(band / 2 + (groove ? 0 : 4))],
+                                                 pulse);
+                                    if (rad < edge * 0.30) {          /* the label */
+                                        bits = 0xFF;
+                                        RGB label = {182, 58, 46};
+                                        if (rad < edge * 0.05) label = (RGB){20, 20, 24};
+                                        else if (((int)(rad * 3) & 1)) label = (RGB){208, 176, 96};
+                                        col = scalec(label, pulse);
+                                    } else if (rad > edge * 0.98) {
+                                        col = scalec((RGB){14, 14, 17}, pulse);
+                                    }
+                                    /* specular sweep, as if turning under a lamp */
+                                    double ang = atan2(ddy, ddx) - tsec * 0.55;
+                                    double sweep = cos(ang);
+                                    if (sweep > 0.972 && rad > edge * 0.30)
+                                        col = scalec(lerp(col, (RGB){226, 230, 240},
+                                                          (sweep - 0.972) / 0.028), pulse);
+                                }
                             } else if (m_storm || m_glacier || m_bamboo || m_solar) {
                                 int band = tiles_[t].e[0] >> 4;
                                 double tsec = now_ms() * 0.001;
@@ -2961,7 +3065,7 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                                             bits |= BRAILLE_BIT[yy][xx];
                                 if (!bits) bits = 0xFF;
                                 col = scalec(col, pulse);
-                            } else if (m_streets || m_neurons || m_mycelium || m_delta || m_rail) {
+                            } else if (m_streets || m_neurons || m_mycelium || m_delta || m_rail || m_loom) {
                                 bool netpx[8][8];
                                 art_circuit(t, netpx);
                                 for (int yy = 0; yy < 4; yy++)
@@ -3022,6 +3126,9 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                             else if (!strcmp(shm, "bamboo")) { da = (RGB){8, 17, 12}; db = (RGB){74, 122, 62}; }
                             else if (!strcmp(shm, "solar")) { da = (RGB){28, 8, 2}; db = (RGB){214, 108, 20}; }
                             else if (!strcmp(shm, "rail")) { da = (RGB){9, 9, 11}; db = (RGB){110, 118, 130}; }
+                            else if (!strcmp(shm, "canyon")) { da = (RGB){24, 15, 13}; db = (RGB){186, 114, 62}; }
+                            else if (!strcmp(shm, "vinyl")) { da = (RGB){7, 7, 9}; db = (RGB){96, 96, 110}; }
+                            else if (!strcmp(shm, "loom")) { da = (RGB){14, 11, 9}; db = (RGB){178, 128, 78}; }
                             for (int yy = 0; yy < 4; yy++)
                                 for (int xx = 0; xx < 2; xx++)
                                     if ((hash3((uint32_t)cx, (uint32_t)cy,
@@ -3490,7 +3597,7 @@ static void render_frame(long steps, int attempts, double pulse) {
 /* ---------------- image sampling (shared by BMP + GIF export) ---------------- */
 static RGB img_px(int cx, int cy, int ix, int iy, int art) {
     const char *mode = mode_name();
-    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta"), m_storm = !strcmp(mode, "storm"), m_glacier = !strcmp(mode, "glacier"), m_bamboo = !strcmp(mode, "bamboo"), m_solar = !strcmp(mode, "solar"), m_rail = !strcmp(mode, "rail");
+    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta"), m_storm = !strcmp(mode, "storm"), m_glacier = !strcmp(mode, "glacier"), m_bamboo = !strcmp(mode, "bamboo"), m_solar = !strcmp(mode, "solar"), m_rail = !strcmp(mode, "rail"), m_canyon = !strcmp(mode, "canyon"), m_vinyl = !strcmp(mode, "vinyl"), m_loom = !strcmp(mode, "loom");
     uint64_t d = dom_[IDX(cx, cy)];
     if (pc64(d) != 1) {
         if (ghosting()) {
@@ -3685,6 +3792,25 @@ static RGB img_px(int cx, int cy, int ix, int iy, int art) {
         }
         return c;
     }
+    if (m_canyon) {
+        int band = tiles_[t].e[0] >> 4;
+        if (cy >= H_ - 2) return lerp(CANYONPAL[1], (RGB){30, 74, 96}, 0.75);
+        RGB c = CANYONPAL[band];
+        if (elev_of_cell(cx, (cy + H_ - 1) % H_) != band)
+            c = scalec(c, iy < art / 2 ? 0.72 : 1.12);
+        return c;
+    }
+    if (m_vinyl) {
+        double ddx = (cx - W_ / 2.0) * 0.5, ddy = cy - H_ / 2.0;
+        double rad = sqrt(ddx * ddx + ddy * ddy);
+        double edge = (H_ < W_ ? H_ : W_) * 0.5;
+        int band = tiles_[t].e[0] >> 4;
+        if (rad < edge * 0.05) return (RGB){20, 20, 24};
+        if (rad < edge * 0.30)
+            return ((int)(rad * 3) & 1) ? (RGB){208, 176, 96} : (RGB){182, 58, 46};
+        if (rad > edge * 0.98) return (RGB){14, 14, 17};
+        return VINYLPAL[clampb(band / 2 + (((int)(rad * 2.4) & 1) ? 0 : 4))];
+    }
     if (m_storm) {
         int band = tiles_[t].e[0] >> 4;
         int shift = (int)(now_ms() * 0.00055);
@@ -3760,7 +3886,7 @@ static RGB img_px(int cx, int cy, int ix, int iy, int art) {
         return line ? (RGB){16, 13, 12} : MONDPAL[band];
     }
     bool px[8][8];
-    if (m_streets || m_neurons || m_mycelium || m_delta || m_rail) {
+    if (m_streets || m_neurons || m_mycelium || m_delta || m_rail || m_loom) {
         art_circuit(t, px);
         if (!px[ix][iy]) return network_bg(mode);
         return network_color(mode, t, cx, cy, 1.0);
@@ -7107,6 +7233,7 @@ inf_continue:
             }
             double t0 = now_ms();
             bool anim = !strcmp(mode_name(), "storm") || !strcmp(mode_name(), "solar")
+                        || !strcmp(mode_name(), "vinyl")
                         || !strcmp(mode_name(), "bamboo")
                         || !strcmp(mode_name(), "fire") || !strcmp(mode_name(), "waves")
                         || !strcmp(mode_name(), "galaxy") || !strcmp(mode_name(), "city") || !strcmp(mode_name(), "aurora");
