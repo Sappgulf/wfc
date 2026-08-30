@@ -2,6 +2,8 @@
 wfc
 wfc_asan
 wfc_asan.dSYM/
+wfc_debug
+wfc_debug.dSYM/
 *.o
 
 # generated outputs
@@ -16,3 +18,8 @@ wfc_world.bin
 
 # mac junk
 .DS_Store
+__pycache__/
+
+# agent tooling artifacts
+.buddy-data/
+.deskbuddy/

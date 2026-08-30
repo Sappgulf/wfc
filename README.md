@@ -9,7 +9,7 @@ make
 ./wfc
 ```
 
-## The eleven worlds
+## The twenty-one worlds
 
 | mode      | design                                        |
 |-----------|-----------------------------------------------|
@@ -24,9 +24,19 @@ make
 | city      | night skylines with beacons + rain            |
 | aurora    | drifting green curtains over stars            |
 | matrix    | digital rain with white-hot glyph heads       |
+| pipes     | water pressure networks, pulses racing runs   |
+| mondrian  | painted plazas split by charcoal rules        |
+| koi       | pond bands, koi gliding between lily pads     |
+| lava      | crusting basalt over a molten breath          |
+| sakura    | spring night, blossom petals drifting down    |
+| geode     | crystal cavern facets with wandering glints   |
+| lantern   | festival sky, lanterns rising past the stars  |
+| dunes     | heat shimmer under a fixed blazing sun        |
+| reef      | caustic water, coral, bubbles, a fish school  |
+| stained   | jewel-glass panes, lead lines, roaming light  |
 
 Press `m` to cycle, `z` for the all-worlds sheet, `r` for the raytraced
-heightfield view of any solved world.
+heightfield view, `i` for the isometric relief view of any solved world.
 
 ## Keys
 
@@ -34,14 +44,16 @@ heightfield view of any solved world.
 `+` / `-` speed · `I` slow-mo · `p` pause · `e` entropy view ·
 `g` gif · `c` auto-cycle · `s` save png · `a` audio · `o` share link ·
 `v` clipboard shot · `k` CRT · `f` drift cam · `W`/`L` world save/load ·
-`u` undo · `h` help · `q` quit
+`u` undo · `i` iso view · `,` / `.` scrub the collapse in time ·
+`n` zen mode · `T` toggle the thermodynamic solver · `w a s d` hero crawl
+through solved dungeons (light all the torches) · `h` help · `q` quit
 
 Mouse: left-click seed, right-click carve, drag paint, hover inspect.
 
 ## Flags
 
 ```
---mode M     circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix
+--mode M     circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained
 --w/--h N    grid cells (auto-fit by default)
 --seed N|w   numeric or word seed
 --speed N    collapse steps/sec
@@ -54,12 +66,56 @@ Mouse: left-click seed, right-click carve, drag paint, hover inspect.
 --bench      performance table
 --pan        camera drift
 --daycycle   terrain dawn/dusk
---sound      synth sfx
+--sound      synth sfx + per-world ambient drones
+--solver     classic | thermo[=potts|ising]
+--theme N    color theme 0-7 (same as y)
+--list-modes print all mode names and exit
+--zen        worlds dissolve into each other — endless, no restarts
 --no-bloom / --no-weather  kill switches
 --once       exit after one map
 ```
 
+**Zen mode** (`n`, or `--zen`): when a world finishes it lingers as a ghost
+while the next collapse seeds itself on top — the frontier visibly re-weaves
+the old world into the new one, scattering away cell by cell with a slow
+radial sweep, while the whole field drifts like a slow orbit. No hard
+restarts, ever. The ghost fade self-paces to the collapse time. Combine
+with `c` (auto-cycle) for an endless morphing slideshow. The preference is
+remembered in `~/.wfcrc`.
+
+**Zen GIF loops**: `--gif out.gif --zen` (or `g` then watch, then `q`)
+records *across* the morphs and writes one seamless loop when you quit —
+the dissolve itself is in the gif.
+
 Environmental memory: `~/.wfcrc` remembers mode/theme/speed/density/audio/CRT.
+
+## The thermodynamic solver
+
+`--solver thermo` (or `T` live) re-runs the *same* WFC problem as a
+pairwise energy-based model, sampled with **Extropic's THRML**:
+
+- cells become `CategoricalNode`s, the cdir compatibility table becomes a
+  pairwise `CategoricalEBMFactor` energy (+1 compatible, −5 violating),
+  tile weights become per-cell unary style preferences,
+- block Gibbs with checkerboard coloring runs under an inverse-temperature
+  sweep (`beta` 0.2 → 8), many chains in parallel (`vmap` + `lax.scan`),
+  and the first fully-valid state wins — the classic solver's retry loop
+  becomes hot re-anneals at fresh keys,
+- `thermo=ising` reports the **Z1 p-bit budget**: the domain-wall
+  thermometer compile of the same model — `cells × (K−1)` spins — that a
+  Thermodynamic Sampling Unit would run natively.
+
+It needs a Python sidecar: `pip install thrml jax` (see [thrml docs](https://docs.thrml.ai)),
+then either run `wfc` from the repo root (it finds `wfc_thermo.py` there),
+or point at your venv:
+
+```sh
+WFC_PYTHON=/path/to/venv/bin/python ./wfc --solver thermo
+```
+
+If python3/thrml aren't available, the solver notes "thermo failed" and
+falls back to classic automatically — the project still builds with zero
+dependencies.
 
 ## The raymarcher
 
@@ -70,10 +126,14 @@ Albedo comes from the active mode's palette (ray-traced fires, nebulae, seas).
 
 ## Test discipline
 
-- 11/11 modes solve first-try across seed sweeps
+- 21/21 modes solve first-try across seed sweeps
 - AddressSanitizer + UBSan clean on solver, exports, all interactive paths
+  (`make asan`, then `./wfc_asan --mode <m> --once --save out.png`; pty via
+  `script -q /dev/null ./wfc_asan ...` for the interactive paths)
+- Zero warnings under `-Wall -Wextra -Wpedantic -Wshadow` (`make strict`)
 - Dirty-diff rendering: only changed cells repaint, frames are
   synchronized-output wrapped
 - `--bench` prints a per-mode performance table
 
-~3,500 lines of C. `cc -O2 -std=c11 -o wfc wfc.c -lz` if you hate make.
+~4,700 lines of C, ~500 lines of Python. `cc -O2 -std=c11 -o wfc wfc.c -lz`
+if you hate make.
