@@ -9,35 +9,40 @@ make
 ./wfc
 ```
 
-## The twenty-five worlds
+## The thirty worlds
 
-| mode      | design                                        |
-|-----------|-----------------------------------------------|
-| circuit   | rainbow circuit boards, signals racing traces |
-| terrain   | hillshaded biomes + carved rivers + day cycle |
-| truchet   | woven arcs with a travelling light pulse      |
-| fire      | living flames with rising embers              |
-| waves     | rolling ocean, crest lines, moonpath          |
-| dungeon   | torch-lit catacombs with breathing warmth     |
-| maze      | labyrinth with wall pulses                    |
-| galaxy    | nebulae with shooting stars                   |
-| city      | night skylines with beacons + rain            |
-| aurora    | drifting green curtains over stars            |
-| matrix    | digital rain with white-hot glyph heads       |
-| pipes     | water pressure networks, pulses racing runs   |
-| mondrian  | painted plazas split by charcoal rules        |
-| koi       | pond bands, koi gliding between lily pads     |
-| lava      | crusting basalt over a molten breath          |
-| sakura    | spring night, blossom petals drifting down    |
-| geode     | crystal cavern facets with wandering glints   |
-| lantern   | festival sky, lanterns rising past the stars  |
-| dunes     | heat shimmer under a fixed blazing sun        |
-| reef      | caustic water, coral, bubbles, a fish school  |
-| stained   | jewel-glass panes, lead lines, roaming light  |
-| streets   | procedural city streets, lanes, signals, and intersections |
-| neurons   | branching brain-like dendrites with traveling action pulses |
-| mycelium  | living root networks, knots, and drifting spore light |
-| delta     | tidal estuary channels, confluences, sandbars, and glints |
+| mode     | design                                           |
+|----------|--------------------------------------------------|
+| circuit  | rainbow circuit boards, signals racing traces    |
+| terrain  | hillshaded biomes + carved rivers + day cycle    |
+| truchet  | woven arcs with a travelling light pulse         |
+| fire     | living flames with rising embers                 |
+| waves    | rolling ocean, crest lines, moonpath             |
+| dungeon  | torch-lit catacombs with breathing warmth        |
+| maze     | labyrinth with wall pulses                       |
+| galaxy   | nebulae with shooting stars                      |
+| city     | night skylines with beacons + rain               |
+| aurora   | drifting green curtains over stars               |
+| matrix   | digital rain with white-hot glyph heads          |
+| pipes    | water pressure networks, pulses racing runs      |
+| mondrian | painted plazas split by charcoal rules           |
+| koi      | pond bands, koi gliding between lily pads        |
+| lava     | crusting basalt over a molten breath             |
+| sakura   | spring night, blossom petals drifting down       |
+| geode    | crystal cavern facets with wandering glints      |
+| lantern  | festival sky, lanterns rising past the stars     |
+| dunes    | heat shimmer under a fixed blazing sun           |
+| reef     | caustic water, coral, bubbles, a fish school     |
+| stained  | jewel-glass panes, lead lines, roaming light     |
+| streets  | arterial grid, lanes, signals, intersections     |
+| neurons  | branching dendrites with travelling potentials   |
+| mycelium | living root networks, knots, drifting spores     |
+| delta    | tidal estuary channels, confluences, sandbars    |
+| storm    | thunderhead anvils, rain veils, forked lightning |
+| glacier  | blue ice shelves split by crevasses and glints   |
+| bamboo   | swaying stalks and nodes under a lit canopy      |
+| solar    | granulated photosphere, sunspots, arcing flares  |
+| rail     | marshalling yard, running trains, switch lamps   |
 
 Press `m` to cycle, `z` for the all-worlds sheet, `r` for the raytraced
 heightfield view, `i` for the isometric relief view of any solved world.
@@ -111,7 +116,8 @@ leaves the winner active for `--save` or `--report`.
 
 The network worlds have deterministic macro guidance before local WFC detail:
 streets uses an arterial grid, neurons use soma/branch rays, mycelium uses
-spore tendrils, and delta uses a source-to-mouth channel field. These are soft
+spore tendrils, delta uses a source-to-mouth channel field, and rail lays
+parallel trunk roads with ladder crossovers. These are soft
 priors, so hard compatibility and propagation still decide the final map.
 
 Fullscreen layout is available at launch with `--fullscreen`, or interactively
@@ -226,11 +232,11 @@ automation. For a deeper local experiment, run
 
 `make check` is the gate: pedantic build, all 25 modes, seed/argument/export
 regressions, the Python protocol, bridge and learner suites, the quality
-benchmark, a 150-combo sanitizer sweep of every mode against every render
+benchmark, a 180-combo sanitizer sweep of every mode against every render
 toggle (`make sweep`), and a randomized ASan fuzz (`make fuzz`). The whole
 thing runs in about 25 seconds.
 
-- 25/25 modes solve first-try across seed sweeps
+- 30/30 modes solve first-try across seed sweeps
 - AddressSanitizer + UBSan clean on solver, exports, all interactive paths
   (`make asan`, then `./wfc_asan --mode <m> --once --save out.png`; pty via
   `script -q /dev/null ./wfc_asan ...` for the interactive paths)

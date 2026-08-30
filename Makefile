@@ -62,7 +62,7 @@ learning-check:
 
 quality-check: wfc
 	@set -e; \
-	for m in circuit streets neurons mycelium delta; do \
+	for m in circuit streets neurons mycelium delta rail; do \
 		out=$$(WFC_DEBUG=1 ./wfc --mode $$m --seed 7 --w 8 --h 6 --once 2>&1 >/dev/null); \
 		echo "$$out" | grep -q 'quality='; \
 	done; \

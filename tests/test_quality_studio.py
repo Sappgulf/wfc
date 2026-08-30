@@ -24,12 +24,15 @@ class QualityStudioTests(unittest.TestCase):
                               env=merged, capture_output=True, text=True,
                               timeout=10)
 
-    def test_delta_is_registered_as_a_new_world(self):
+    def test_registry_lists_unique_named_worlds(self):
         result = self.run_wfc("--list-modes")
         self.assertEqual(result.returncode, 0, result.stderr)
         modes = result.stdout.splitlines()
-        self.assertEqual(len(modes), 25)
-        self.assertIn("delta", modes)
+        self.assertEqual(len(modes), len(set(modes)), "duplicate mode name")
+        self.assertTrue(set(modes) >= {
+            "circuit", "terrain", "delta", "storm", "glacier",
+            "bamboo", "solar", "rail",
+        })
 
     def test_report_contains_reproducibility_quality_thermo_and_studio(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -110,6 +113,46 @@ class QualityStudioTests(unittest.TestCase):
         self.assertIn("E evolution", result.stdout)
         self.assertIn("--evolve N", result.stdout)
         self.assertIn("--fullscreen", result.stdout)
+
+    def test_every_registered_mode_solves_and_exports(self):
+        """Each row in MODESPEC[] must solve headlessly and survive an export.
+
+        A new world is a table row plus a render branch; this is the gate that
+        catches a row whose branch was never wired into the renderers.
+        """
+        modes = self.run_wfc("--list-modes").stdout.split()
+        self.assertGreaterEqual(len(modes), 30)
+        with tempfile.TemporaryDirectory() as tmp:
+            for mode in modes:
+                png = Path(tmp) / ("%s.png" % mode)
+                report = Path(tmp) / ("%s.json" % mode)
+                result = self.run_wfc(
+                    "--mode", mode, "--seed", "31337", "--w", "14", "--h", "9",
+                    "--once", "--save", os.fspath(png),
+                    "--report", os.fspath(report))
+                self.assertEqual(result.returncode, 0,
+                                 "%s: %s" % (mode, result.stderr))
+                self.assertGreater(png.stat().st_size, 0, mode)
+                payload = json.loads(report.read_text(encoding="utf-8"))
+                self.assertEqual(payload["mode"], mode)
+                self.assertGreater(payload["quality"]["total"], 0.0, mode)
+
+    def test_network_worlds_all_carry_macro_guidance(self):
+        """Every world flagged `network` in the registry must guide cells.
+
+        rail joined the family late; without a macro_role_at() arm it would
+        report zero guided cells and quietly fall back to ungrided WFC.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            for mode in ("streets", "neurons", "mycelium", "delta", "rail"):
+                report = Path(tmp) / ("%s.json" % mode)
+                result = self.run_wfc("--mode", mode, "--seed", "7",
+                                      "--w", "24", "--h", "14", "--once",
+                                      "--report", os.fspath(report))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(report.read_text(encoding="utf-8"))
+                self.assertNotEqual(payload["macro"]["name"], "none", mode)
+                self.assertGreater(payload["macro"]["guided_cells"], 0, mode)
 
     def test_help_lists_every_registered_mode(self):
         """--help renders the mode list from MODES[], so it cannot go stale."""
