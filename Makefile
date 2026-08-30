@@ -45,7 +45,8 @@ regression: wfc
 	echo 'regression: seed, argument, and export contracts OK'
 
 python-check:
-	@python3 -m py_compile wfc_thermo.py
+	@python3 -m py_compile wfc_learning.py wfc_thermo.py tests/fake_thermo.py \
+		tests/test_wfc_learning.py tests/test_protocol_contract.py tests/test_c_bridge.py
 	@echo 'python: syntax OK'
 
 protocol-check:
@@ -59,9 +60,14 @@ learning-check:
 	@echo "learning: profile/update contract OK"
 
 quality-check: wfc
-	@set -e; out=$$(WFC_DEBUG=1 ./wfc --mode circuit --seed 7 --w 8 --h 6 --once 2>&1 >/dev/null); \
+	@set -e; \
+	for m in circuit streets neurons mycelium; do \
+		out=$$(WFC_DEBUG=1 ./wfc --mode $$m --seed 7 --w 8 --h 6 --once 2>&1 >/dev/null); \
 		echo "$$out" | grep -q 'quality='; \
-		echo "quality: deterministic metrics OK"
+	done; \
+	street=$$(WFC_DEBUG=1 ./wfc --mode streets --seed 7 --w 8 --h 6 --once 2>&1 >/dev/null); \
+	echo "$$street" | grep -q 'boundary=1.000'; \
+	echo "quality: deterministic metrics and network borders OK"
 
 fuzz: wfc_asan
 	@set -e; modes=$$(./wfc --list-modes); n=$$(echo "$$modes" | wc -l | tr -d ' '); \

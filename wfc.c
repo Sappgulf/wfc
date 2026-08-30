@@ -61,6 +61,7 @@ static bool g_save_auto = false;
 static double g_delay_ms;
 static int g_render_every;
 static int g_decided = 0;
+static double g_quality_live = -1.0;
 static bool g_daycycle = false;
 static bool g_twin = false;
 static bool g_quad = false;
@@ -737,45 +738,50 @@ static bool world_grow(void) {
 }
 
 /* contradiction repair that preserves decided cells */
+static uint64_t grid_cell_mask(int x, int y);
 static void grid_soft_reset(void) {
-    uint64_t full = ((uint64_t)1 << ntiles_) - 1;
     for (int i = 0; i < W_ * H_; i++)
-        if (pc64(dom_[i]) != 1) dom_[i] = full;
+        if (pc64(dom_[i]) != 1)
+            dom_[i] = grid_cell_mask(i % W_, i / W_);
+}
+static bool bounded_connector_mode(void) {
+    const char *m = MODES[g_mode_idx];
+    return !g_torus && (!strcmp(m, "truchet") || !strcmp(m, "streets") ||
+                        !strcmp(m, "neurons") || !strcmp(m, "mycelium"));
+}
+static uint64_t grid_cell_mask(int x, int y) {
+    uint64_t full = ((uint64_t)1 << ntiles_) - 1;
+    uint64_t m = full;
+    if (bounded_connector_mode()) { /* connector strokes must stay in frame */
+        for (int t = 0; t < ntiles_; t++) {
+            if (y == 0 && tiles_[t].e[0]) m &= ~(1ULL << t);
+            if (y == H_ - 1 && tiles_[t].e[2]) m &= ~(1ULL << t);
+            if (x == 0 && tiles_[t].e[3]) m &= ~(1ULL << t);
+            if (x == W_ - 1 && tiles_[t].e[1]) m &= ~(1ULL << t);
+        }
+    }
+    bool fire_grad = !strcmp(MODES[g_mode_idx], "fire") || !strcmp(MODES[g_mode_idx], "city")
+                     || !strcmp(MODES[g_mode_idx], "aurora") || !strcmp(MODES[g_mode_idx], "lava")
+                     || !strcmp(MODES[g_mode_idx], "sakura") || !strcmp(MODES[g_mode_idx], "lantern")
+                     || !strcmp(MODES[g_mode_idx], "dunes") || !strcmp(MODES[g_mode_idx], "reef");
+    if (fire_grad) {
+        int tb = (int)(7.0 * (H_ - 1 - y) / (H_ > 1 ? H_ - 1 : 1));
+        if (!strcmp(MODES[g_mode_idx], "aurora")) tb = 7 - tb;
+        if (!strcmp(MODES[g_mode_idx], "lava") || !strcmp(MODES[g_mode_idx], "lantern")) tb = 7 - tb;
+        int lo = tb - 2 < 0 ? 0 : tb - 2, hi = tb + 2 > 7 ? 7 : tb + 2;
+        for (int t = 0; t < ntiles_; t++) {
+            int b = tiles_[t].e[0] >> 4;
+            if (b < lo || b > hi) m &= ~(1ULL << t);
+        }
+    }
+    return m;
 }
 static void grid_reset(void) {
-    uint64_t full = ((uint64_t)1 << ntiles_) - 1;
-    bool truchet_borders = !strcmp(MODES[g_mode_idx], "truchet");
-    bool fire_grad = !strcmp(MODES[g_mode_idx], "fire") || !strcmp(MODES[g_mode_idx], "city")
-                         || !strcmp(MODES[g_mode_idx], "aurora") || !strcmp(MODES[g_mode_idx], "lava")
-                         || !strcmp(MODES[g_mode_idx], "sakura") || !strcmp(MODES[g_mode_idx], "lantern")
-                         || !strcmp(MODES[g_mode_idx], "dunes") || !strcmp(MODES[g_mode_idx], "reef");
-    bool lava_flip = !strcmp(MODES[g_mode_idx], "lava") || !strcmp(MODES[g_mode_idx], "lantern");
     hist_clear();
     hist_stride_ = W_ * H_ > 8000 ? 4 : 1;
     for (int y = 0; y < H_; y++)
         for (int x = 0; x < W_; x++) {
-            uint64_t m = full;
-            if (!g_torus && truchet_borders) { /* walls may not poke out of bounds */
-                for (int t = 0; t < ntiles_; t++) {
-                    if (y == 0 && tiles_[t].e[0]) m &= ~(1ULL << t);
-                    if (y == H_ - 1 && tiles_[t].e[2]) m &= ~(1ULL << t);
-                    if (x == 0 && tiles_[t].e[3]) m &= ~(1ULL << t);
-                    if (x == W_ - 1 && tiles_[t].e[1]) m &= ~(1ULL << t);
-                }
-            }
-            if (fire_grad) { /* window around row target */
-                int tb = (int)(7.0 * (H_ - 1 - y) / (H_ > 1 ? H_ - 1 : 1));
-                if (!strcmp(MODES[g_mode_idx], "aurora"))
-                    tb = 7 - tb; /* aurora: bright at the top, faded below */
-                if (lava_flip)
-                    tb = 7 - tb; /* lava: molten pool at the bottom, crust above */
-                int lo = tb - 2 < 0 ? 0 : tb - 2, hi = tb + 2 > 7 ? 7 : tb + 2;
-                for (int t = 0; t < ntiles_; t++) {
-                    int b = tiles_[t].e[0] >> 4;
-                    if (b < lo || b > hi) m &= ~(1ULL << t);
-                }
-            }
-            dom_[IDX(x, y)] = m;
+            dom_[IDX(x, y)] = grid_cell_mask(x, y);
         }
     if (!strcmp(MODES[g_mode_idx], "koi")) koi_seed();
     memset(river_, 0, (size_t)W_ * H_);
@@ -786,6 +792,7 @@ static void grid_reset(void) {
     for (int i = 0; i < W_ * H_; i++) comp_[i] = -1;
     n_comp_ = 0;
     g_comp_ready = false;
+    g_quality_live = -1.0;
 }
 
 /* flood-fill connected traces; each loop gets its own golden-angle hue */
@@ -961,6 +968,7 @@ static int wfc_step(void) {
 typedef struct {
     double total;
     double validity;
+    double boundary;
     double coverage;
     double diversity;
     double smoothness;
@@ -1038,6 +1046,23 @@ static QualityMetrics quality_measure(bool final_map) {
 
     q.coverage = quality_clamp((double)decided / (double)cells);
     q.validity = empty ? 0.0 : edge_known ? quality_clamp((double)edge_good / edge_known) : 1.0;
+    q.boundary = 1.0;
+    if (bounded_connector_mode()) {
+        int boundary_known = 0, boundary_good = 0;
+        for (int y = 0; y < H_; y++) {
+            for (int x = 0; x < W_; x++) {
+                uint64_t mask = dom_[IDX(x, y)];
+                if (pc64(mask) != 1) continue;
+                int tile = __builtin_ctzll(mask);
+                if (y == 0) { boundary_known++; boundary_good += !tiles_[tile].e[0]; }
+                if (y == H_ - 1) { boundary_known++; boundary_good += !tiles_[tile].e[2]; }
+                if (x == 0) { boundary_known++; boundary_good += !tiles_[tile].e[3]; }
+                if (x == W_ - 1) { boundary_known++; boundary_good += !tiles_[tile].e[1]; }
+            }
+        }
+        q.boundary = boundary_known ? quality_clamp((double)boundary_good / boundary_known) : 1.0;
+        q.validity = quality_clamp(q.validity * q.boundary);
+    }
     if (decided > 0) {
         double entropy = 0.0;
         for (int t = 0; t < ntiles_; t++) {
@@ -1207,8 +1232,17 @@ static RGB network_color(const char *mode, int tile, int cx, int cy, double puls
     uint32_t h = hash3((uint32_t)(cx * 17 + tile), (uint32_t)(cy * 29 + degree), 731);
     if (!strcmp(mode, "streets")) {
         double signal = 0.80 + 0.20 * sin(now_ms() * 0.0017 + cx * 0.8 + cy * 0.33);
-        RGB c = STREETPAL[degree > 7 ? 7 : degree + (h % 2)];
-        if (h % 37 == 5) c = (RGB){244, 86, 72};
+        int band = degree >= 3 ? 5 + (int)(h % 3) : degree + 1 + (int)(h % 2);
+        if (band > 7) band = 7;
+        RGB c = STREETPAL[band];
+        if (degree >= 3) {
+            /* Intersections read as lit crossings instead of generic circuit nodes. */
+            c = lerp(c, STREETPAL[7], 0.30);
+            signal *= 0.88 + 0.12 * sin(now_ms() * 0.003 + cx * 0.4 + cy * 0.6);
+        } else if (degree == 1 && h % 37 == 5) {
+            /* A sparse red marker gives dead ends a traffic-signal language. */
+            c = lerp(c, (RGB){244, 86, 72}, 0.72);
+        }
         return scalec(c, pulse * signal);
     }
     if (!strcmp(mode, "neurons")) {
@@ -1559,6 +1593,7 @@ static void render_help(void) {
 }
 
 /* ---------------- render ---------------- */
+static void render_status(int vh, int ch);
 static bool g_paused = false;
 static bool g_slowmo = false;
 static bool g_entropy_view = false;
@@ -2737,19 +2772,7 @@ static void render_frame(long steps, int attempts, double pulse) {
         }
     }
     full_repaint_ = false;
-    /* transient status note, bottom line (invisible in raw diffs; redrawn
-     * only when it changes or when a full repaint happens) */
-    if (now_ms() < g_note_until && g_note[0]) {
-        char sb[96];
-        snprintf(sb, sizeof sb, "\x1b[%d;1H", vh * ch + 1);
-        fb_puts(sb);
-        fb_bg((RGB){14, 12, 18});
-        fb_fg((RGB){200, 220, 200});
-        fb_puts(" ");
-        fb_puts(g_note);
-        fb_puts("\x1b[K");
-        fb_bg((RGB){0, 0, 0});
-    }
+    render_status(vh, ch);
     frame_begin();
     fwrite(fb_, 1, fblen_, stdout);
     frame_end();
@@ -4008,6 +4031,7 @@ static double thermo_beta_ = 0;
 static double thermo_confidence_ = 0;
 static long thermo_observations_ = 0;
 static double thermo_quality_ = 0;
+static char thermo_sampler_[8] = "idle";
 static uint64_t *thermo_snap_ = NULL;
 static size_t thermo_snap_cap_ = 0;
 
@@ -4127,6 +4151,11 @@ static bool thermo_launch(void) {
     g_thermo_reset_learning = false;
     thermo_launches_++;
     thermo_valid_ = false; /* a fresh run must earn its own result */
+    thermo_beta_ = 0;
+    thermo_confidence_ = 0;
+    thermo_observations_ = 0;
+    thermo_quality_ = 0;
+    snprintf(thermo_sampler_, sizeof thermo_sampler_, "boot");
     signal(SIGPIPE, SIG_IGN);
 
     fprintf(thermo_in_, "{\"v\":1,\"t\":\"init\",\"mode\":");
@@ -4304,6 +4333,7 @@ static bool thermo_apply_patch(const char *s) {
     g_decided = 0;
     for (size_t i = 0; i < cells_n; i++) if (pc64(dom_[i]) == 1) g_decided++;
     QualityMetrics after = quality_measure(false);
+    g_quality_live = after.total;
     return thermo_send_feedback(cells, tiles, count, accepted, rejected,
                                 contradictions, before, after);
 }
@@ -4398,8 +4428,18 @@ static int thermo_poll(void) {
                         thermo_ready_ = true;
                         thermo_pbits_ = (int)json_num(s, "pbits", thermo_pbits_);
                         thermo_observations_ = json_num(s, "observations", thermo_observations_);
+                        const char *sp = json_str(s, "sampler");
+                        if (sp && sp[0] == '"') {
+                            const char *end = strchr(sp + 1, '"');
+                            size_t len = end && (size_t)(end - sp - 1) < sizeof thermo_sampler_ - 1
+                                       ? (size_t)(end - sp - 1) : 0;
+                            if (len) {
+                                memcpy(thermo_sampler_, sp + 1, len);
+                                thermo_sampler_[len] = 0;
+                            }
+                        }
                         set_note("thermo online â adaptive proposals (%s)",
-                                 strstr(s, "\"sampler\":\"thrml\"") ? "THRML" : "python");
+                                 thermo_sampler_);
                         if (thermo_reset_pending_) {
                             thermo_reset_pending_ = false;
                             if (!thermo_send_reset()) goto thermo_fail;
@@ -4454,6 +4494,48 @@ thermo_fail:
     thermo_kill();
     set_note("thermo failed \xe2\x80\x94 classic solver");
     return -1;
+}
+
+/* Persistent one-line HUD: keep the canvas legible while making the solver's
+ * state visible between transient notes.  It is rendered below the art so it
+ * never competes with the procedural image itself. */
+static void render_status(int vh, int ch) {
+    if (W_ <= 0 || H_ <= 0) return;
+    int total = W_ * H_;
+    int pct = total > 0 ? (int)(100.0 * g_decided / total) : 0;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    char core[160], line[256];
+    const char *mode = MODES[g_mode_idx];
+    if (g_thermo) {
+        const char *engine = thermo_ready_ ? thermo_sampler_ : "boot";
+        const char *learning = g_thermo_learn ? "learn" : "ephem";
+        if (thermo_quality_ > 0.0) {
+            snprintf(core, sizeof core, "%s %3d%% | T/%s q%.2f o%ld %s",
+                     mode, pct, engine, thermo_quality_, thermo_observations_, learning);
+        } else {
+            snprintf(core, sizeof core, "%s %3d%% | T/%s %s",
+                     mode, pct, engine, learning);
+        }
+    } else if (pct == 100 && g_quality_live >= 0.0) {
+        snprintf(core, sizeof core, "%s %3d%% | classic q%.2f", mode, pct, g_quality_live);
+    } else {
+        snprintf(core, sizeof core, "%s %3d%% | classic", mode, pct);
+    }
+    if (now_ms() < g_note_until && g_note[0])
+        snprintf(line, sizeof line, "%s | %s", core, g_note);
+    else
+        snprintf(line, sizeof line, "%s", core);
+
+    char pos[32];
+    snprintf(pos, sizeof pos, "\x1b[%d;1H", vh * ch + 1);
+    fb_puts(pos);
+    fb_bg((RGB){10, 12, 18});
+    fb_fg(g_thermo ? (RGB){172, 224, 214} : (RGB){170, 196, 224});
+    fb_puts(" ");
+    fb_puts(line);
+    fb_puts("\x1b[K");
+    fb_bg((RGB){0, 0, 0});
 }
 
 /* key + mouse handling: returns request code 0 none, 1 new map, 2 quit */
@@ -4645,8 +4727,8 @@ static void handle_click(int btn, int px, int py) {
     if (btn & 2) { /* right-click: carve cell back open */
         if (pc64(dom_[cell]) == ntiles_ || pc64(dom_[cell]) == 0) return;
         memcpy(snap_, dom_, sizeof(uint64_t) * (size_t)W_ * H_);
-        uint64_t m = ((uint64_t)1 << ntiles_) - 1;
         int cx2 = cell % W_, cy2 = cell / W_;
+        uint64_t m = grid_cell_mask(cx2, cy2);
         for (int d = 0; d < NDIR; d++) {
             int nx = cx2, ny = cy2;
             if (d == 0) ny = g_torus ? (cy2 + H_ - 1) % H_ : cy2 - 1;
@@ -4865,7 +4947,7 @@ static int pump_keys(bool tty) {
                 g_thermo = !g_thermo;
                 thermo_kill();
                 full_repaint_ = true;
-                set_note("thermo solver %s (Extropic THRML)", g_thermo ? "ON" : "off");
+                set_note("thermo solver %s", g_thermo ? "ON" : "off");
             }
         }
         else if (c == 'R') {
@@ -5386,10 +5468,11 @@ int main(int argc, char **argv) {
             for (int k = 0; k < 5; k++) fprintf(stderr, " %d:%.0f%%", k, 100.0 * em[k] / (W_ * H_));
             fprintf(stderr, "\n");
             QualityMetrics qm = quality_measure(true);
+            g_quality_live = qm.total;
             double qr = quality_reward((QualityMetrics){0}, qm, W_ * H_, 0);
-            fprintf(stderr, "quality=%.3f validity=%.3f coverage=%.3f diversity=%.3f "
+            fprintf(stderr, "quality=%.3f validity=%.3f boundary=%.3f coverage=%.3f diversity=%.3f "
                             "smoothness=%.3f topology=%.3f reward=%+.3f\n",
-                    qm.total, qm.validity, qm.coverage, qm.diversity,
+                    qm.total, qm.validity, qm.boundary, qm.coverage, qm.diversity,
                     qm.smoothness, qm.topology, qr);
         }
         if (g_save_path[0] && !save_image(g_save_path)) {
@@ -5536,6 +5619,7 @@ inf_continue:
             if (g_sound) { ensure_sfx(); play_sfx("/tmp/wfc_done.wav"); }
             int is_terrain = !strcmp(MODES[g_mode_idx], "terrain");
             load_world(0);
+            g_quality_live = quality_measure(true).total;
             if ((!strcmp(MODES[g_mode_idx], "circuit") || !strcmp(MODES[g_mode_idx], "pipes")) && !g_stop && g_nworlds == 1) label_components();
             if (is_terrain && !g_stop && g_nworlds == 1) {
                 if (g_inf) rivers_clear();

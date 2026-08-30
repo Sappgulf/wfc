@@ -20,7 +20,8 @@ The long-lived protocol is bidirectional:
 
 The sampler is intentionally optional.  If THRML/JAX is installed, the
 one-shot compatibility API below remains available; the persistent worker
-uses a dependency-free Boltzmann proposal engine when that stack is absent.
+uses its dependency-free bounded proposal engine so incremental learning has
+the same behavior in every environment.
 
 WFC is a pairwise Potts/EBM: cells are categorical nodes, cdir masks are
 pairwise compatibility energies, tile weights are unary biases. THRML
@@ -658,7 +659,10 @@ class ThermoSession:
         self.round = 0
         self.beta_scale = 1.0
         self.pending = None
-        self.sampler = "thrml" if _RUNTIME_ERROR is None else "python"
+        # The persistent path is deliberately the bounded Python proposal
+        # engine.  THRML remains available for the legacy one-shot API, but
+        # claiming it here would misdescribe the incremental worker.
+        self.sampler = "python"
         domain = spec.get("domain")
         pbits = (sum(mask.bit_count() - 1 for mask in domain)
                  if domain is not None else spec["w"] * spec["h"] * (spec["ntiles"] - 1))

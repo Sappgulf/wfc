@@ -87,7 +87,9 @@ class ProtocolContractTests(unittest.TestCase):
     def test_real_worker_handshake_and_stop(self):
         proc = self.launch_worker(REAL_WORKER)
         send(proc, init_payload())
-        self.assertEqual(read_event(proc)["t"], "ready")
+        ready = read_event(proc)
+        self.assertEqual(ready["t"], "ready")
+        self.assertEqual(ready["sampler"], "python")
         send(proc, {"v": 1, "t": "stop"})
         self.assertEqual(proc.wait(timeout=2), 0)
 

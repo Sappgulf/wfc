@@ -131,7 +131,8 @@ budgets before sampling; malformed requests emit a structured `fatal` line
 and the C parent falls back to the classic solver.
 
 THRML/JAX is optional. If installed, the legacy one-shot compatibility API can
-use it; the persistent worker also has a dependency-free bounded sampler, so
+use it; the persistent worker deliberately uses its dependency-free bounded
+sampler, so
 `--solver thermo` remains usable without a Python package install. To enable
 the accelerated sampler, install `thrml` and `jax` (see [thrml docs](https://docs.thrml.ai)),
 then either run `wfc` from the repo root (it finds `wfc_thermo.py` there), or
