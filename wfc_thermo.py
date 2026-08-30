@@ -57,6 +57,7 @@ from wfc_learning import (
     reset_state,
     save_profile,
     tile_fingerprint,
+    _normalize_metrics,
     update_state,
 )
 
@@ -227,6 +228,10 @@ def validate_spec(spec):
     if not isinstance(mode, str) or len(mode) > 64:
         raise ValueError("mode must be a short string")
     spec["mode"] = mode
+    quality_focus = spec.get("quality_focus", "general")
+    if not isinstance(quality_focus, str) or len(quality_focus) > 32:
+        raise ValueError("quality_focus must be a short string")
+    spec["quality_focus"] = quality_focus
     learn = spec.get("learn", True)
     if not isinstance(learn, bool):
         raise ValueError("learn must be boolean")
@@ -620,6 +625,7 @@ class ThermoSession:
         self.beta_scale = 1.0
         self.pending = None
         self.sampler = "python"
+        self.quality_focus = "general"
 
     def _identity(self, spec):
         mode = spec.get("mode", "default")
@@ -659,6 +665,7 @@ class ThermoSession:
         self.round = 0
         self.beta_scale = 1.0
         self.pending = None
+        self.quality_focus = spec["quality_focus"] or "general"
         # The persistent path is deliberately the bounded Python proposal
         # engine.  THRML remains available for the legacy one-shot API, but
         # claiming it here would misdescribe the incremental worker.
@@ -671,6 +678,7 @@ class ThermoSession:
             "t": "ready",
             "schema": 1,
             "sampler": self.sampler,
+            "quality_focus": self.quality_focus,
             "observations": self.state["observations"],
             "pbits": int(pbits),
         })
@@ -876,6 +884,7 @@ class ThermoSession:
             "cfg": cfg,
             "form": self.spec["form"],
             "sampler": self.sampler,
+            "quality_focus": self.quality_focus,
         })
         return True
 
@@ -937,6 +946,13 @@ class ThermoSession:
             self.beta_scale = max(0.72, self.beta_scale * 0.94)
         elif accepted > 0 and reward >= 0.0:
             self.beta_scale = min(1.35, self.beta_scale * 1.018)
+        metrics = command.get("metrics")
+        if metrics is None:
+            metrics = {
+                "total": max(0.0, min(1.0, float(command.get("quality", 0.0)))),
+                "focus": command.get("quality_focus", self.quality_focus),
+            }
+        metrics = _normalize_metrics(metrics)
         if self.learn:
             update_state(
                 self.state,
@@ -944,8 +960,11 @@ class ThermoSession:
                 self._feedback_events(command, "tile_events"),
                 self._feedback_events(command, "pair_events"),
                 self._feedback_events(command, "context_events"),
+                metrics=metrics,
             )
             self._save()
+        metrics_history = self.state.get("metrics_history", [])
+        latest_metrics = metrics_history[-1] if metrics_history else {}
         emit({
             "v": 1,
             "t": "learn",
@@ -955,6 +974,8 @@ class ThermoSession:
             "pair_bias": [round(float(value), 6) for value in self.state["pair_bias"]],
             "context_bias": [round(float(value), 6) for value in self.state["context_bias"]],
             "beta_scale": round(self.beta_scale, 6),
+            "metrics": latest_metrics,
+            "metrics_history_count": len(metrics_history),
         })
         self.pending = None
 
@@ -974,6 +995,8 @@ class ThermoSession:
             "pair_bias": list(self.state["pair_bias"]),
             "context_bias": list(self.state["context_bias"]),
             "beta_scale": 1.0,
+            "metrics": {},
+            "metrics_history_count": 0,
             "reset": True,
         })
 

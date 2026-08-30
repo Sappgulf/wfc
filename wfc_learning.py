@@ -15,6 +15,16 @@ PROFILE_VERSION = 1
 BIAS_LIMIT = 2.5
 HISTORY_LIMIT = 64
 CONTEXT_COUNT = 8
+METRIC_KEYS = (
+    "total",
+    "validity",
+    "boundary",
+    "coverage",
+    "diversity",
+    "smoothness",
+    "stability",
+    "topology",
+)
 
 
 def _is_int(value):
@@ -63,6 +73,7 @@ def new_state(ntiles, pair_count, context_count=CONTEXT_COUNT):
         "pair_bias": [0.0] * pair_count,
         "context_bias": [0.0] * context_count,
         "quality_history": [],
+        "metrics_history": [],
     }
 
 
@@ -84,6 +95,27 @@ def _apply_events(values, events, delta, learning_rate, decay, label):
             -BIAS_LIMIT,
             BIAS_LIMIT,
         )
+
+
+def _normalize_metrics(metrics):
+    if metrics is None:
+        return None
+    if not isinstance(metrics, dict):
+        raise ValueError("metrics must be an object")
+    normalized = {}
+    for key in METRIC_KEYS:
+        if key not in metrics:
+            continue
+        value = _finite(metrics[key], "%s metric" % key)
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("%s metric is out of range" % key)
+        normalized[key] = value
+    if "focus" in metrics:
+        focus = metrics["focus"]
+        if not isinstance(focus, str) or len(focus) > 32:
+            raise ValueError("metric focus must be a short string")
+        normalized["focus"] = focus
+    return normalized
 
 
 def _validate_state(state, ntiles, pair_count, context_count=CONTEXT_COUNT):
@@ -113,17 +145,23 @@ def _validate_state(state, ntiles, pair_count, context_count=CONTEXT_COUNT):
         raise ValueError("quality_history is invalid")
     for value in history:
         _finite(value, "quality_history value")
+    metrics_history = state.get("metrics_history", [])
+    if not isinstance(metrics_history, list) or len(metrics_history) > HISTORY_LIMIT:
+        raise ValueError("metrics_history is invalid")
+    for metrics in metrics_history:
+        _normalize_metrics(metrics)
     return state
 
 
 def update_state(state, reward, tile_events, pair_events, context_events,
-                 learning_rate=0.06, decay=0.995):
+                 learning_rate=0.06, decay=0.995, metrics=None):
     """Apply one bounded reward update and return the mutated state."""
     if not isinstance(state, dict):
         raise ValueError("state must be an object")
     reward = _finite(reward, "reward")
     learning_rate = _finite(learning_rate, "learning_rate")
     decay = _finite(decay, "decay")
+    normalized_metrics = _normalize_metrics(metrics)
     if learning_rate <= 0.0 or learning_rate > 1.0:
         raise ValueError("learning_rate must be in (0, 1]")
     if decay < 0.0 or decay > 1.0:
@@ -150,6 +188,10 @@ def update_state(state, reward, tile_events, pair_events, context_events,
     state["observations"] += 1
     state["quality_history"].append(reward)
     del state["quality_history"][:-HISTORY_LIMIT]
+    state.setdefault("metrics_history", [])
+    if normalized_metrics is not None:
+        state["metrics_history"].append(normalized_metrics)
+        del state["metrics_history"][:-HISTORY_LIMIT]
     return state
 
 
@@ -195,6 +237,7 @@ def load_profile(path, mode, fingerprint, ntiles, pair_count,
         _validate_state(state, ntiles, pair_count, context_count)
         state["mode"] = str(mode)
         state["fingerprint"] = str(fingerprint)
+        state.setdefault("metrics_history", [])
         return state
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
         return fresh

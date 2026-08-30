@@ -3,7 +3,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn thermo into a persistent, quality-driven online learner that proposes safe incremental WFC assignments while adding streets, neurons, and mycelium worlds.
+**Goal:** Turn thermo into a persistent, quality-driven online learner that proposes safe incremental WFC assignments while adding streets, neurons, mycelium, and delta worlds.
 
 **Architecture:** Keep hard domains, compatibility, propagation, rollback, and rendering authoritative in wfc.c. Add a persistent JSON-lines worker protocol to wfc_thermo.py; it samples fixed-shape THRML chains in rounds, receives deterministic quality feedback, and updates bounded per-mode tile, pair, and context biases. Add a pure standard-library wfc_learning.py module for profile math and persistence, then integrate the learned terms into the existing C/Python bridge without changing classic behavior.
 
@@ -610,7 +610,7 @@ Verify visually that multiple proposals are accepted during one map, the HUD
 changes over time, R resets observations, q exits cleanly, and the terminal
 returns to the shell. Do not launch this interactive path through a Codex PTY.
 
-### Task 6: Add the three connector worlds and their quality metadata
+### Task 6: Add the four connector worlds and their quality metadata
 
 **Files:**
 - Modify: wfc.c mode list, tile builders, setup metadata, animation clock,
@@ -618,16 +618,17 @@ returns to the shell. Do not launch this interactive path through a Codex PTY.
 - Modify: README.md mode table and flags once rendering is complete
 
 **Interfaces:**
-- Produces build_streets, build_neurons, build_mycelium, mode_is_network, and
-  mode_name behavior with mode indices appended after the original 21 modes.
+- Produces build_streets, build_neurons, build_mycelium, build_delta,
+  mode_is_network, and mode_name behavior with mode indices appended after the
+  original 21 modes.
 - Consumes the existing Tile edge/flag representation and build_compat.
 
 - [ ] **Step 1: Add mode names without renumbering existing worlds**
 
-Change the mode count to 24 and append exactly:
+Change the mode count to 25 and append exactly:
 
 ~~~c
-"streets", "neurons", "mycelium"
+"streets", "neurons", "mycelium", "delta"
 ~~~
 
 Do not reorder the original entries; this preserves existing saved mode indices
@@ -672,9 +673,9 @@ multiple components with varied branch lengths.
 - [ ] **Step 6: Add mode setup and animation entries**
 
 Dispatch the builders in setup_mode, classify all three as network modes, add
-animation epochs at 140 ms for streets, 100 ms for neurons, and 180 ms for
-mycelium, and ensure g_torus, g_smooth, g_bulk_idx, and hero state are
-initialized deterministically.
+  animation epochs at 140 ms for streets, 100 ms for neurons, 180 ms for
+  mycelium, and 145 ms for delta, and ensure g_torus, g_smooth, g_bulk_idx,
+  and hero state are initialized deterministically.
 
 - [ ] **Step 7: Run classic mode coverage**
 
@@ -682,12 +683,12 @@ Run:
 
 ~~~bash
 make test
-for m in streets neurons mycelium; do
+for m in streets neurons mycelium delta; do
   ./wfc --mode "$m" --seed 7 --w 40 --h 20 --once >/dev/null
 done
 ~~~
 
-Expected: all 24 modes solve headlessly and the three new modes return status 0.
+Expected: all 25 modes solve headlessly and the four new modes return status 0.
 
 ### Task 7: Add renderers, image exports, and quality-specific visuals
 
@@ -698,7 +699,7 @@ Expected: all 24 modes solve headlessly and the three new modes return status 0.
 
 **Interfaces:**
 - Produces network_mask, network_degree, network_color, and renderer branches
-  for streets, neurons, and mycelium in both terminal and raster paths.
+  for streets, neurons, mycelium, and delta in both terminal and raster paths.
 - Consumes tile flags, anim_epoch, g_seed, g_hover_x/y, and the existing PNG/GIF
   pipeline.
 
@@ -734,7 +735,7 @@ at both normal and zoomed terminal scales.
 Run:
 
 ~~~bash
-for m in streets neurons mycelium; do
+for m in streets neurons mycelium delta; do
   ./wfc --mode "$m" --seed 9 --w 24 --h 12 --once --save "/tmp/$m.png" >/dev/null
   test -s "/tmp/$m.png"
 done
@@ -815,7 +816,7 @@ Run:
 make learning-check
 make protocol-check
 ./wfc --help | grep -E -- '--no-learn|--thermo-profile|--reset-learning'
-./wfc --list-modes | tail -3 | grep -E 'streets|neurons|mycelium'
+./wfc --list-modes | tail -4 | grep -E 'streets|neurons|mycelium|delta'
 ~~~
 
 ### Task 9: Full verification, review, commit, push, and Terminal.app handoff
@@ -853,9 +854,9 @@ make asan
 make fuzz
 ~~~
 
-Expected: all 24 modes, gallery/collage, deterministic seed/argument/export
+Expected: all 25 modes, gallery/collage, deterministic seed/argument/export
 regressions, Python syntax, learner tests, fake protocol, adaptive patch path,
-strict compile, sanitizer build, and 24 random sanitizer combinations pass.
+strict compile, sanitizer build, and 25 random sanitizer combinations pass.
 
 - [ ] **Step 3: Run additional thermo and profile checks when dependencies exist**
 
@@ -880,7 +881,7 @@ osascript -e 'tell application "Terminal" to activate' \
   -e 'tell application "Terminal" to do script "cd /Users/austinbeatty/Downloads/0x && ./wfc --solver thermo --mode streets --w 32 --h 16"'
 ~~~
 
-Test m across streets, neurons, and mycelium, T to toggle thermo, R to reset
+Test m across streets, neurons, mycelium, and delta, T to toggle thermo, R to reset
 learning, e for confidence/entropy, s for PNG, g for GIF, and q to quit. Verify
 Terminal.app returns to a shell and the process does not remain orphaned.
 
@@ -927,7 +928,7 @@ any skipped real-THRML test with the reason.
 - **Spec coverage:** hard/soft separation is covered by Tasks 1, 3, and 4;
   persistent protocol and incremental proposals by Tasks 3–5; three learning
   layers by Tasks 1, 3, and 5; adaptive annealing by Task 3; profiles by Task 1
-  and Task 8; scoring by Task 2; all three modes by Tasks 6–7; HUD/controls by
+  and Task 8; scoring by Task 2; all four modes by Tasks 6–7; HUD/controls by
   Tasks 5 and 8; error handling by Tasks 3–4; verification by Task 9.
 - **Completeness scan:** every step contains concrete files, interfaces, commands,
   expected outcomes, or exact implementation rules; no unresolved work markers

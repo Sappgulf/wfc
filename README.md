@@ -9,7 +9,7 @@ make
 ./wfc
 ```
 
-## The twenty-four worlds
+## The twenty-five worlds
 
 | mode      | design                                        |
 |-----------|-----------------------------------------------|
@@ -37,6 +37,7 @@ make
 | streets   | procedural city streets, lanes, signals, and intersections |
 | neurons   | branching brain-like dendrites with traveling action pulses |
 | mycelium  | living root networks, knots, and drifting spore light |
+| delta     | tidal estuary channels, confluences, sandbars, and glints |
 
 Press `m` to cycle, `z` for the all-worlds sheet, `r` for the raytraced
 heightfield view, `i` for the isometric relief view of any solved world.
@@ -49,15 +50,16 @@ heightfield view, `i` for the isometric relief view of any solved world.
 `v` clipboard shot · `k` CRT · `f` drift cam · `W`/`L` world save/load ·
 `u` undo · `i` iso view · `,` / `.` scrub the collapse in time ·
 `n` zen mode · `T` toggle the thermodynamic solver · `R` reset thermo learning ·
+`l` quality observatory · `P` pin/unpin the hovered cell ·
 `w a s d` hero crawl
 through solved dungeons (light all the torches) · `h` help · `q` quit
 
-Mouse: left-click seed, right-click carve, drag paint, hover inspect.
+Mouse: left-click seed, right-click carve or unpin, drag paint, hover inspect.
 
 ## Flags
 
 ```
---mode M     circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium
+--mode M     circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium|delta
 --w/--h N    grid cells (auto-fit by default)
 --seed N|w   numeric or word seed
 --speed N    collapse steps/sec
@@ -65,6 +67,7 @@ Mouse: left-click seed, right-click carve, drag paint, hover inspect.
 --twin/--quad 2 or 4 worlds at once
 --gfx/--no-gfx  iTerm2/WezTerm/kitty/ghostty pixel rendering
 --gif/--save/--zoom N  exports
+--report out.json       quality, thermo, and studio observatory report
 --gallery out.html  all-mode web showcase
 --collage out.png    mosaic of all worlds
 --bench      performance table
@@ -81,6 +84,14 @@ Mouse: left-click seed, right-click carve, drag paint, hover inspect.
 --no-bloom / --no-weather  kill switches
 --once       exit after one map
 ```
+
+The quality observatory (`l`) pauses the current run and shows the active
+mode focus, all eight quality dimensions, thermo counters, and a bounded
+64-sample trend. `--report FILE.json` writes the same reproducible snapshot
+for scripts, including mode, seed, dimensions, solver, learner counters, and
+pin count. `P` pins the hovered singleton (collapsing it transactionally if
+needed); `P` again or right-click reopens it only where current neighbors
+allow. `u` restores the previous domain and pin state.
 
 Headless runs are intentionally bounded: `--twin`, `--quad`, and
 `--infinite` require an interactive terminal. Numeric options are validated
@@ -105,7 +116,7 @@ Environmental memory: `~/.wfcrc` remembers mode/theme/speed/density/audio/CRT.
 ## The thermodynamic solver
 
 `--solver thermo` (or `T` live) re-runs the *same* WFC problem as a
-pairwise energy-based model, sampled with **Extropic's THRML**:
+pairwise energy-based model:
 
 - cells become `CategoricalNode`s, the cdir compatibility table becomes a
   pairwise `CategoricalEBMFactor` energy (+1 compatible, −5 violating),
@@ -123,12 +134,14 @@ The sidecar is a long-lived JSONL worker: C sends `init`, bounded `sample`
 rounds, and measured `feedback`; the worker returns `ready`, `stats`,
 incremental `proposal` patches, and `learn` updates. C transactionally applies
 each patch through the authoritative propagator and rolls it back on a
-contradiction. Tile, compatible-pair, and boundary-context preferences are
-bounded, fingerprinted per mode, and atomically persisted in
-`~/.wfc-thermo` (or `--thermo-profile DIR`). `--no-learn` keeps a run
-ephemeral. The worker validates dimensions, masks, domains, and sampling
-budgets before sampling; malformed requests emit a structured `fatal` line
-and the C parent falls back to the classic solver.
+contradiction. Each feedback frame carries the complete mode-aware quality
+vector, and the learner records a bounded metric history in addition to tile,
+compatible-pair, and boundary-context preferences. Everything is bounded,
+fingerprinted per mode, and atomically persisted in `~/.wfc-thermo` (or
+`--thermo-profile DIR`). `--no-learn` keeps a run ephemeral. The worker
+validates dimensions, masks, domains, metrics, and sampling budgets before
+sampling; malformed requests emit a structured `fatal` line and the C parent
+falls back to the classic solver.
 
 THRML/JAX is optional. If installed, the legacy one-shot compatibility API can
 use it; the persistent worker deliberately uses its dependency-free bounded
@@ -155,7 +168,7 @@ Albedo comes from the active mode's palette (ray-traced fires, nebulae, seas).
 
 ## Test discipline
 
-- 24/24 modes solve first-try across seed sweeps
+- 25/25 modes solve first-try across seed sweeps
 - AddressSanitizer + UBSan clean on solver, exports, all interactive paths
   (`make asan`, then `./wfc_asan --mode <m> --once --save out.png`; pty via
   `script -q /dev/null ./wfc_asan ...` for the interactive paths)

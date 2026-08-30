@@ -11,6 +11,7 @@
  *   streets : procedural city streets with signals and crossings
  *   neurons : branching dendrites with live action potentials
  *   mycelium: organic root networks and drifting spores
+ *   delta   : branching river mouths, estuaries, and tidal glints
  *
  * Views: r raymarched heightfield, i isometric relief, z all-worlds sheet.
  * Extras: gif/png export, terminal pixel rendering (iTerm/kitty/WezTerm),
@@ -48,8 +49,8 @@
 #define OPPOSITE(d) (((d) + 2) & 3)
 
 /* ---------------- config ---------------- */
-#define NMODES 24
-static const char *MODES[NMODES] = {"circuit", "terrain", "truchet", "fire", "waves", "dungeon", "maze", "galaxy", "city", "aurora", "matrix", "pipes", "mondrian", "koi", "lava", "sakura", "geode", "lantern", "dunes", "reef", "stained", "streets", "neurons", "mycelium"};
+#define NMODES 25
+static const char *MODES[NMODES] = {"circuit", "terrain", "truchet", "fire", "waves", "dungeon", "maze", "galaxy", "city", "aurora", "matrix", "pipes", "mondrian", "koi", "lava", "sakura", "geode", "lantern", "dunes", "reef", "stained", "streets", "neurons", "mycelium", "delta"};
 static int g_mode_idx = 0;
 static int g_user_w = 999, g_user_h = 999;
 static uint64_t g_seed = 0;
@@ -85,15 +86,31 @@ static bool g_hero_on = false;
 static int g_hx = 0, g_hy = 0;
 static int g_loot = 0, g_loot_tot = 0;
 static char g_collage_path[512] = {0};
+static char g_report_path[512] = {0};
 static int g_zoom = 1;
 static int g_fit_w = 80, g_fit_h = 24;   /* terminal viewport in cells */
 static int g_vx = 0, g_vy = 0;
 static double now_ms(void);
+static void quality_trace_clear(void);
+static void thermo_json_string(FILE *f, const char *s);
 static int g_inf_ax = 0, g_inf_ay = 0;
 static uint32_t *prev_sig_ = NULL;
 static size_t prev_sig_cap_ = 0;
 static bool full_repaint_ = true;
 static double last_draw_ms_ = -1000;
+static uint8_t *studio_pin_ = NULL;
+static uint8_t *studio_tile_ = NULL;
+static int studio_pin_count_ = 0;
+#define QUALITY_TRACE_N 64
+static double g_quality_trace_[QUALITY_TRACE_N];
+static int g_quality_trace_len_ = 0, g_quality_trace_pos_ = 0;
+static double g_quality_validity_live = -1.0;
+static double g_quality_boundary_live = -1.0;
+static double g_quality_coverage_live = -1.0;
+static double g_quality_diversity_live = -1.0;
+static double g_quality_smoothness_live = -1.0;
+static double g_quality_stability_live = -1.0;
+static double g_quality_topology_live = -1.0;
 
 /* per-mode animation clock: coarse buckets so idle animations repaint
  * at sane rates instead of mutating every pixel every frame */
@@ -122,11 +139,14 @@ static uint32_t anim_epoch(void) {
     if (!strcmp(m, "streets")) return (uint32_t)(now_ms() / 170);  /* traffic signals */
     if (!strcmp(m, "neurons")) return (uint32_t)(now_ms() / 95);   /* action potentials */
     if (!strcmp(m, "mycelium")) return (uint32_t)(now_ms() / 260); /* spore drift */
+    if (!strcmp(m, "delta")) return (uint32_t)(now_ms() / 145); /* tidal glints */
     return 0;
 }
 static int g_bulk_idx = -1;
 static bool g_cycle = false;
 static bool g_help = false;
+static bool g_observe = false;
+static bool g_observe_was_paused = false;
 static volatile sig_atomic_t g_winch = 0;
 
 static int W_, H_;
@@ -212,6 +232,11 @@ static void build_neurons(void) {
 /* mycelium: sparse roots, knots, and a few spore-like termini */
 static void build_mycelium(void) {
     static const double weights[14] = {24, 10, 10, 7, 7, 7, 7, 3.8, 3.8, 2.4, 2.4, 2.0, 2.0, 0.45};
+    build_connector_world(weights);
+}
+/* delta: long channels dominate, with occasional confluences and sandbars */
+static void build_delta(void) {
+    static const double weights[14] = {18, 16, 16, 10, 10, 10, 10, 9, 7, 1.8, 1.8, 1.0, 1.0, 0.9};
     build_connector_world(weights);
 }
 /* mondrian: five painted plains + rare black slab; blockers are drawn as
@@ -303,7 +328,8 @@ static void apply_bias(void) {
     }
     if (!strcmp(MODES[g_mode_idx], "circuit") || !strcmp(MODES[g_mode_idx], "truchet") ||
         !strcmp(MODES[g_mode_idx], "pipes") || !strcmp(MODES[g_mode_idx], "streets") ||
-        !strcmp(MODES[g_mode_idx], "neurons") || !strcmp(MODES[g_mode_idx], "mycelium")) {
+        !strcmp(MODES[g_mode_idx], "neurons") || !strcmp(MODES[g_mode_idx], "mycelium") ||
+        !strcmp(MODES[g_mode_idx], "delta")) {
         g_bulk_idx = 0;
         for (int i = 0; i < ntiles_; i++)
             tiles_[i].weight = tiles_[i].wbase *
@@ -539,6 +565,7 @@ static void setup_mode(int idx) {
     else if (!strcmp(m, "streets")) { build_streets(); build_compat(false); }
     else if (!strcmp(m, "neurons")) { build_neurons(); build_compat(false); }
     else if (!strcmp(m, "mycelium")) { build_mycelium(); build_compat(false); }
+    else if (!strcmp(m, "delta")) { build_delta(); build_compat(false); }
     else { build_circuit(); build_compat(false); }
     g_torus = strcmp(MODES[g_mode_idx], "truchet") != 0;
     /* fire keeps torus off too */
@@ -546,7 +573,7 @@ static void setup_mode(int idx) {
         !strcmp(MODES[g_mode_idx], "aurora") || !strcmp(MODES[g_mode_idx], "lava") ||
         !strcmp(MODES[g_mode_idx], "sakura") || !strcmp(MODES[g_mode_idx], "lantern") ||
         !strcmp(MODES[g_mode_idx], "dunes") || !strcmp(MODES[g_mode_idx], "reef") ||
-        !strcmp(MODES[g_mode_idx], "streets"))
+        !strcmp(MODES[g_mode_idx], "streets") || !strcmp(MODES[g_mode_idx], "delta"))
         g_torus = false;
     g_smooth = !strcmp(MODES[g_mode_idx], "terrain") ||
                !strcmp(MODES[g_mode_idx], "fire") ||
@@ -561,8 +588,8 @@ static void setup_mode(int idx) {
                !strcmp(MODES[g_mode_idx], "sakura") ||
                !strcmp(MODES[g_mode_idx], "geode") ||
                !strcmp(MODES[g_mode_idx], "lantern") ||
-               !strcmp(MODES[g_mode_idx], "dunes") ||
-               !strcmp(MODES[g_mode_idx], "reef") ||
+        !strcmp(MODES[g_mode_idx], "dunes") ||
+        !strcmp(MODES[g_mode_idx], "reef") ||
                !strcmp(MODES[g_mode_idx], "stained");
     g_hero_on = false;
     apply_bias();
@@ -634,12 +661,16 @@ static void grid_alloc(int w, int h) {
     free_world_buffers();
     free(river_); free(river_rank_);
     free(comp_); free(comp_col_);
+    free(studio_pin_); free(studio_tile_);
+    studio_pin_ = NULL; studio_tile_ = NULL; studio_pin_count_ = 0;
     dom_ = malloc(sizeof(uint64_t) * (size_t)w * h);
     stk_ = malloc(sizeof(int) * (size_t)w * h * MAXT);
     river_ = malloc((size_t)w * h);
     river_rank_ = malloc(sizeof(int) * (size_t)w * h);
     comp_ = malloc(sizeof(int) * (size_t)w * h);
     comp_col_ = malloc(sizeof(RGB) * (size_t)w * h);
+    studio_pin_ = calloc((size_t)w * h, 1);
+    studio_tile_ = malloc((size_t)w * h);
     free(domB_); free(stkB_); free(domC_); free(stkC_); free(domD_); free(stkD_);
     domB_ = malloc(sizeof(uint64_t) * (size_t)w * h);
     stkB_ = malloc(sizeof(int) * (size_t)w * h * MAXT);
@@ -648,13 +679,17 @@ static void grid_alloc(int w, int h) {
     domD_ = malloc(sizeof(uint64_t) * (size_t)w * h);
     stkD_ = malloc(sizeof(int) * (size_t)w * h * MAXT);
     if (!dom_ || !stk_ || !river_ || !river_rank_ || !comp_ || !comp_col_ ||
+        !studio_pin_ || !studio_tile_ ||
         !domB_ || !stkB_ || !domC_ || !stkC_ || !domD_ || !stkD_) {
         perror("malloc");
         free_world_buffers();
         free(river_); free(river_rank_); free(comp_); free(comp_col_);
+        free(studio_pin_); free(studio_tile_);
         river_ = NULL; river_rank_ = NULL; comp_ = NULL; comp_col_ = NULL;
+        studio_pin_ = NULL; studio_tile_ = NULL;
         exit(1);
     }
+    memset(studio_tile_, 0, (size_t)w * h);
     rsB_ = g_seed ^ 0xA24BAED4963EE407ULL;
     rsC_ = g_seed ^ 0x9FB21C651E98DF25ULL;
     rsD_ = g_seed ^ 0xC13FA9A902A6328FULL;
@@ -684,11 +719,15 @@ static bool world_grow(void) {
     int *ns = malloc(sizeof(int) * (size_t)gw * gh * MAXT);
     uint8_t *nriv = calloc((size_t)gw * gh, 1);
     int *nrr = malloc(sizeof(int) * (size_t)gw * gh);
-    if (!nd || !ns || !nriv || !nrr) { free(nd); free(ns); free(nriv); free(nrr); return false; }
+    uint8_t *npin = calloc((size_t)gw * gh, 1);
+    uint8_t *ntile = calloc((size_t)gw * gh, 1);
+    if (!nd || !ns || !nriv || !nrr || !npin || !ntile) {
+        free(nd); free(ns); free(nriv); free(nrr); free(npin); free(ntile); return false;
+    }
     int *nc = malloc(sizeof(int) * (size_t)gw * gh);
     RGB *ncc = malloc(sizeof(RGB) * (size_t)gw * gh);
     if (!nc || !ncc) {
-        free(nc); free(ncc); free(nd); free(ns); free(nriv); free(nrr);
+        free(nc); free(ncc); free(nd); free(ns); free(nriv); free(nrr); free(npin); free(ntile);
         return false;
     }
     uint64_t full = ((uint64_t)1 << ntiles_) - 1;
@@ -699,14 +738,18 @@ static bool world_grow(void) {
         for (int x = 0; x < W_; x++) {
             uint64_t v = dom_[IDX(x, y)];
             nd[(size_t)(y + oy) * gw + (x + ox)] = v;
+            npin[(size_t)(y + oy) * gw + (x + ox)] = studio_pin_[IDX(x, y)];
+            ntile[(size_t)(y + oy) * gw + (x + ox)] = studio_tile_[IDX(x, y)];
             if (river_rank_[IDX(x, y)] >= 0 && g_river_show > 0)
                 nriv[(size_t)(y + oy) * gw + (x + ox)] = 1,
                 nrr[(size_t)(y + oy) * gw + (x + ox)] = river_rank_[IDX(x, y)];
         }
     free(dom_); free(stk_); free(river_); free(river_rank_);
     free(comp_); free(comp_col_);
+    free(studio_pin_); free(studio_tile_);
     comp_ = nc; comp_col_ = ncc;
     dom_ = nd; stk_ = ns; river_ = nriv; river_rank_ = nrr;
+    studio_pin_ = npin; studio_tile_ = ntile;
     int old_w = W_, old_h = H_;
     W_ = gw; H_ = gh;
     g_inf_ax += ox;
@@ -715,6 +758,8 @@ static bool world_grow(void) {
     hist_clear();
     click_bufs_invalidate(); /* undo snapshots are sized to the old canvas */
     n_river_ = 0;
+    studio_pin_count_ = 0;
+    for (int i = 0; i < gw * gh; i++) studio_pin_count_ += studio_pin_[i] != 0;
     world_sync();
     /* pre-constrain the new ring from the solved bedrock border so the
      * solver doesn't immediately contradict at the seam */
@@ -747,7 +792,8 @@ static void grid_soft_reset(void) {
 static bool bounded_connector_mode(void) {
     const char *m = MODES[g_mode_idx];
     return !g_torus && (!strcmp(m, "truchet") || !strcmp(m, "streets") ||
-                        !strcmp(m, "neurons") || !strcmp(m, "mycelium"));
+                        !strcmp(m, "neurons") || !strcmp(m, "mycelium") ||
+                        !strcmp(m, "delta"));
 }
 static uint64_t grid_cell_mask(int x, int y) {
     uint64_t full = ((uint64_t)1 << ntiles_) - 1;
@@ -792,7 +838,10 @@ static void grid_reset(void) {
     for (int i = 0; i < W_ * H_; i++) comp_[i] = -1;
     n_comp_ = 0;
     g_comp_ready = false;
-    g_quality_live = -1.0;
+    memset(studio_pin_, 0, (size_t)W_ * H_);
+    memset(studio_tile_, 0, (size_t)W_ * H_);
+    studio_pin_count_ = 0;
+    quality_trace_clear();
 }
 
 /* flood-fill connected traces; each loop gets its own golden-angle hue */
@@ -976,6 +1025,25 @@ typedef struct {
     double topology;
 } QualityMetrics;
 
+typedef struct {
+    const char *focus;
+    double validity, boundary, coverage, diversity;
+    double smoothness, stability, topology;
+} QualityProfile;
+
+static QualityProfile quality_profile(void) {
+    const char *m = MODES[g_mode_idx];
+    if (!strcmp(m, "streets"))
+        return (QualityProfile){"streets", 0.30, 0.18, 0.14, 0.08, 0.08, 0.06, 0.16};
+    if (!strcmp(m, "neurons"))
+        return (QualityProfile){"neurons", 0.24, 0.05, 0.12, 0.15, 0.08, 0.06, 0.30};
+    if (!strcmp(m, "mycelium"))
+        return (QualityProfile){"mycelium", 0.24, 0.04, 0.16, 0.14, 0.12, 0.06, 0.24};
+    if (!strcmp(m, "delta"))
+        return (QualityProfile){"delta", 0.27, 0.12, 0.14, 0.08, 0.10, 0.05, 0.24};
+    return (QualityProfile){"balanced", 0.30, 0.03, 0.18, 0.16, 0.16, 0.05, 0.12};
+}
+
 static double quality_clamp(double v) {
     if (!isfinite(v)) return 0.0;
     return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v;
@@ -991,7 +1059,8 @@ static bool quality_network_mode(void) {
     return !strcmp(m, "circuit") || !strcmp(m, "truchet") ||
            !strcmp(m, "pipes") || !strcmp(m, "dungeon") ||
            !strcmp(m, "maze") || !strcmp(m, "streets") ||
-           !strcmp(m, "neurons") || !strcmp(m, "mycelium");
+           !strcmp(m, "neurons") || !strcmp(m, "mycelium") ||
+           !strcmp(m, "delta");
 }
 
 static QualityMetrics quality_measure(bool final_map) {
@@ -1084,15 +1153,60 @@ static QualityMetrics quality_measure(bool final_map) {
         const char *m = MODES[g_mode_idx];
         double ideal = !strcmp(m, "streets") ? 2.1 :
                        !strcmp(m, "neurons") ? 1.8 :
-                       !strcmp(m, "mycelium") ? 1.6 : 1.8;
+                       !strcmp(m, "mycelium") ? 1.6 :
+                       !strcmp(m, "delta") ? 1.9 : 1.8;
         double balance = quality_clamp(1.0 - fabs(degree_sum / active - ideal) / 3.0);
         double active_ratio = quality_clamp((double)active / (double)(decided ? decided : 1));
         q.topology = quality_clamp(0.55 * balance + 0.45 * active_ratio);
     }
-    q.total = quality_clamp(0.30 * q.validity + 0.18 * q.coverage +
-                            0.16 * q.diversity + 0.16 * q.smoothness +
-                            0.20 * q.topology);
+    QualityProfile profile = quality_profile();
+    q.total = quality_clamp(profile.validity * q.validity +
+                            profile.boundary * q.boundary +
+                            profile.coverage * q.coverage +
+                            profile.diversity * q.diversity +
+                            profile.smoothness * q.smoothness +
+                            profile.stability * q.stability +
+                            profile.topology * q.topology);
     return q;
+}
+
+static void quality_trace_clear(void) {
+    g_quality_live = -1.0;
+    g_quality_validity_live = -1.0;
+    g_quality_boundary_live = -1.0;
+    g_quality_coverage_live = -1.0;
+    g_quality_diversity_live = -1.0;
+    g_quality_smoothness_live = -1.0;
+    g_quality_stability_live = -1.0;
+    g_quality_topology_live = -1.0;
+    g_quality_trace_len_ = 0;
+    g_quality_trace_pos_ = 0;
+    memset(g_quality_trace_, 0, sizeof g_quality_trace_);
+}
+
+static void quality_record(QualityMetrics q) {
+    g_quality_live = quality_clamp(q.total);
+    g_quality_validity_live = quality_clamp(q.validity);
+    g_quality_boundary_live = quality_clamp(q.boundary);
+    g_quality_coverage_live = quality_clamp(q.coverage);
+    g_quality_diversity_live = quality_clamp(q.diversity);
+    g_quality_smoothness_live = quality_clamp(q.smoothness);
+    g_quality_stability_live = quality_clamp(q.stability);
+    g_quality_topology_live = quality_clamp(q.topology);
+    g_quality_trace_[g_quality_trace_pos_] = g_quality_live;
+    g_quality_trace_pos_ = (g_quality_trace_pos_ + 1) % QUALITY_TRACE_N;
+    if (g_quality_trace_len_ < QUALITY_TRACE_N) g_quality_trace_len_++;
+}
+
+static void quality_json(FILE *f, QualityMetrics q) {
+    QualityProfile profile = quality_profile();
+    fprintf(f, "{\"focus\":\"%s\",\"total\":%.9g,\"validity\":%.9g,"
+               "\"boundary\":%.9g,\"coverage\":%.9g,\"diversity\":%.9g,"
+               "\"smoothness\":%.9g,\"stability\":%.9g,\"topology\":%.9g}",
+            profile.focus, quality_clamp(q.total), quality_clamp(q.validity),
+            quality_clamp(q.boundary), quality_clamp(q.coverage),
+            quality_clamp(q.diversity), quality_clamp(q.smoothness),
+            quality_clamp(q.stability), quality_clamp(q.topology));
 }
 
 static double quality_reward(QualityMetrics before, QualityMetrics after,
@@ -1221,9 +1335,14 @@ static const RGB MYCELIUMPAL[8] = {
     {12, 34, 28}, {16, 58, 38}, {22, 84, 48}, {34, 112, 56},
     {54, 140, 66}, {96, 166, 78}, {168, 184, 108}, {224, 214, 150},
 };
+static const RGB DELTAPAL[8] = {
+    {3, 22, 34}, {4, 42, 58}, {6, 68, 82}, {8, 96, 104},
+    {16, 126, 126}, {38, 158, 142}, {104, 190, 156}, {210, 224, 180},
+};
 static RGB network_bg(const char *mode) {
     if (!strcmp(mode, "streets")) return (RGB){7, 10, 16};
     if (!strcmp(mode, "neurons")) return (RGB){6, 3, 16};
+    if (!strcmp(mode, "delta")) return (RGB){3, 19, 28};
     return (RGB){4, 16, 12};
 }
 static RGB network_color(const char *mode, int tile, int cx, int cy, double pulse) {
@@ -1251,6 +1370,15 @@ static RGB network_color(const char *mode, int tile, int cx, int cy, double puls
         double action = 0.72 + 0.28 * sin(now_ms() * 0.006 + cx * 0.91 + cy * 1.37);
         if (degree >= 3) c = lerp(c, (RGB){255, 150, 230}, 0.22);
         return scalec(c, pulse * action);
+    }
+    if (!strcmp(mode, "delta")) {
+        double tide = 0.84 + 0.16 * sin(now_ms() * 0.0018 + cx * 0.47 - cy * 0.22);
+        int band = degree >= 3 ? 5 + (int)(h % 3) : degree == 2 ? 2 + (int)(h % 4) : 1 + (int)(h % 3);
+        if (band > 7) band = 7;
+        RGB c = DELTAPAL[band];
+        if (degree >= 3) c = lerp(c, DELTAPAL[7], 0.35);
+        if (degree == 1 && h % 19 == 3) c = lerp(c, (RGB){224, 198, 126}, 0.58);
+        return scalec(c, pulse * tide);
     }
     int band = degree + (h % 3 == 0 ? 1 : 0);
     if (band > 7) band = 7;
@@ -1559,7 +1687,7 @@ static void render_help(void) {
         "  modes: circuit terrain truchet fire waves dungeon",
         "  maze galaxy city aurora matrix pipes mondrian",
         "  koi lava sakura geode lantern dunes",
-        "  reef stained streets neurons mycelium",
+        "  reef stained streets neurons mycelium delta",
         "",
         "  space   new map              m     next mode",
         "  y       color theme          c     auto-cycle modes",
@@ -1569,6 +1697,7 @@ static void render_help(void) {
         "  r       raytrace view        e     entropy view\n",
         "  i       isometric view       , .    scrub time\n",
         "  T       thermo solver        R     reset thermo learning\n",
+        "  l       quality observatory   P     pin/unpin hovered cell\n",
         "  wasd    hero walk\n",
         "  n       zen: worlds morph    q     quit",
         "",
@@ -1614,7 +1743,7 @@ static bool glow_neighbor(int wx, int wy, RGB *out) {
         uint64_t d = dom_[IDX(nx, ny)];
         if (pc64(d) != 1) continue;
         int t = __builtin_ctzll(d);
-        if (m_circuit || m_pipes) {
+        if (m_circuit || m_pipes || !strcmp(mode, "streets") || !strcmp(mode, "delta")) {
             /* connector facing us? */
             int dx = -DX[i], dy = -DY[i];
             int side = dy == -1 ? 0 : dx == 1 ? 1 : dy == 1 ? 2 : 3;
@@ -1758,7 +1887,7 @@ static void zen_capture(void) {
 
 static void paint_cell(int wx, int wy, int sub, double pulse) {
     const char *mode = MODES[g_mode_idx];
-    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_truchet = !strcmp(mode, "truchet"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium");
+    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_truchet = !strcmp(mode, "truchet"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta");
     bool braille = !m_terrain;
             if (g_entropy_view && pc64(dom_[IDX(wx, wy)]) > 1) {
                 int k2 = pc64(dom_[IDX(wx, wy)]);
@@ -1883,7 +2012,7 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                                         col = lerp(CITYPAL[band], (RGB){255, 60, 50},
                                                    0.4 + 0.6 * bl2);
                                 }
-                            } else if (m_streets || m_neurons || m_mycelium) {
+                            } else if (m_streets || m_neurons || m_mycelium || m_delta) {
                                 bool netpx[8][8];
                                 art_circuit(t, netpx);
                                 bits = 0;
@@ -1892,7 +2021,7 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                                         if (netpx[chi * 2 + xx][sub * 4 + yy])
                                             bits |= BRAILLE_BIT[yy][xx];
                                 col = network_color(mode, t, wx, wy, pulse);
-                                if (m_streets && !tiles_[t].e[0] && !tiles_[t].e[1] &&
+                                if ((m_streets || m_delta) && !tiles_[t].e[0] && !tiles_[t].e[1] &&
                                     !tiles_[t].e[2] && !tiles_[t].e[3])
                                     col = scalec(network_bg(mode), pulse);
                             } else if (m_aurora) {
@@ -2270,7 +2399,7 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                                             bits |= BRAILLE_BIT[yy][xx];
                                 if (!bits) bits = 0xFF;
                                 col = scalec(col, pulse);
-                            } else if (m_streets || m_neurons || m_mycelium) {
+                            } else if (m_streets || m_neurons || m_mycelium || m_delta) {
                                 bool netpx[8][8];
                                 art_circuit(t, netpx);
                                 for (int yy = 0; yy < 4; yy++)
@@ -2325,6 +2454,7 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                             else if (!strcmp(shm, "streets")) { da = (RGB){7, 10, 16}; db = (RGB){104, 92, 70}; }
                             else if (!strcmp(shm, "neurons")) { da = (RGB){6, 3, 16}; db = (RGB){148, 42, 156}; }
                             else if (!strcmp(shm, "mycelium")) { da = (RGB){4, 16, 12}; db = (RGB){74, 142, 78}; }
+                            else if (!strcmp(shm, "delta")) { da = (RGB){3, 19, 28}; db = (RGB){38, 136, 132}; }
                             for (int yy = 0; yy < 4; yy++)
                                 for (int xx = 0; xx < 2; xx++)
                                     if ((hash3((uint32_t)cx, (uint32_t)cy,
@@ -2353,6 +2483,10 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                         }
                         if (bits) fb_fg(col);
                         fb_braille(bits);
+                        if (studio_pin_ && studio_pin_[IDX(wx, cy)] && chi == 0 && sub == 0) {
+                            fb_fg((RGB){255, 220, 100});
+                            fb_braille(0xFF);
+                        }
                     }
                 } else {
                     if (k == 1) {
@@ -2404,6 +2538,10 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                         }
                         uint32_t h1 = hash3((uint32_t)cx, (uint32_t)cy, 7) % 1000;
                         uint32_t h2 = hash3((uint32_t)cx, (uint32_t)cy, 13) % 1000;
+                        if (studio_pin_ && studio_pin_[IDX(wx, cy)]) {
+                            base = (RGB){255, 220, 100};
+                            sh = 1.0;
+                        }
                         fb_half(scalec(base, (0.92 + h1 * 0.00016) * pulse * sh),
                                 scalec(base, (0.92 + h2 * 0.00016) * pulse * sh));
                     } else {
@@ -2781,7 +2919,7 @@ static void render_frame(long steps, int attempts, double pulse) {
 /* ---------------- image sampling (shared by BMP + GIF export) ---------------- */
 static RGB img_px(int cx, int cy, int ix, int iy, int art) {
     const char *mode = MODES[g_mode_idx];
-    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium");
+    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta");
     uint64_t d = dom_[IDX(cx, cy)];
     if (pc64(d) != 1) {
         if (ghosting()) {
@@ -2792,6 +2930,9 @@ static RGB img_px(int cx, int cy, int ix, int iy, int art) {
         return C_BG;
     }
     int t = __builtin_ctzll(d);
+    if (studio_pin_ && studio_pin_[IDX(cx, cy)] &&
+        (ix == 0 || iy == 0 || ix == art - 1 || iy == art - 1))
+        return (RGB){255, 220, 100};
     if (m_terrain) {
         RGB base = terrain_tint(biome_color(t));
         int rrk = river_rank_[IDX(cx, cy)];
@@ -2999,7 +3140,7 @@ static RGB img_px(int cx, int cy, int ix, int iy, int art) {
         return line ? (RGB){16, 13, 12} : MONDPAL[band];
     }
     bool px[8][8];
-    if (m_streets || m_neurons || m_mycelium) {
+    if (m_streets || m_neurons || m_mycelium || m_delta) {
         art_circuit(t, px);
         if (!px[ix][iy]) return network_bg(mode);
         return network_color(mode, t, cx, cy, 1.0);
@@ -3413,7 +3554,7 @@ static void render_sheet(void) {
     fb_puts("\x1b[0m");
     fb_fg((RGB){100, 120, 150});
     fb_puts("\x1b[1;1H");
-    fb_puts("  wfc sheet \xe2\x80\x94 all twenty-four worlds\xe2\x80\xa6 live\xe2\x80\xa6 (z to close) \xe2\x94\x82 [m]ode selected: ");
+    fb_puts("  wfc sheet \xe2\x80\x94 all twenty-five worlds\xe2\x80\xa6 live\xe2\x80\xa6 (z to close) \xe2\x94\x82 [m]ode selected: ");
     fb_fg((RGB){74, 222, 128});
     fb_puts(MODES[g_mode_idx]);
     frame_begin();
@@ -3656,6 +3797,8 @@ static void draw_any(long steps, int attempts, double pulse) {
     double now = now_ms();
     if (now - last_draw_ms_ < 24) return; /* ~40fps ceiling */
     last_draw_ms_ = now;
+    if (W_ > 0 && H_ > 0 && (g_decided < W_ * H_ || g_quality_live < 0.0))
+        quality_record(quality_measure(false));
     if (g_sound) ambient_update();
     if (g_rt) { render_rt_frame(now); last_draw_ms_ = now_ms(); }
     else if (g_iso) { render_iso_frame(); last_draw_ms_ = now_ms(); }
@@ -3803,7 +3946,7 @@ static void ensure_sfx(void) {
     }
     write_wav("/tmp/wfc_blip.wav", blip, 2600);
     /* per-world stingers */
-    static const char *names[NMODES] = {"circuit","terrain","truchet","fire","waves","dungeon","maze","galaxy","city","aurora","matrix","pipes","mondrian","koi","lava","sakura","geode","lantern","dunes","reef","stained","streets","neurons","mycelium"};
+    static const char *names[NMODES] = {"circuit","terrain","truchet","fire","waves","dungeon","maze","galaxy","city","aurora","matrix","pipes","mondrian","koi","lava","sakura","geode","lantern","dunes","reef","stained","streets","neurons","mycelium","delta"};
     for (int mi2 = 0; mi2 < NMODES; mi2++) {
         static float st[44100 / 2];
         for (int i = 0; i < 22050; i++) st[i] = 0;
@@ -3832,6 +3975,7 @@ static void ensure_sfx(void) {
             {{196,0},{294,0.14},{392,0.28},{587,0.42},{0,0}},
             {{220,0},{330,0.10},{440,0.20},{660,0.30},{0,0}},
             {{147,0},{196,0.14},{247,0.28},{330,0.42},{0,0}},
+            {{196,0},{247,0.12},{294,0.24},{392,0.36},{0,0}},
         };
         for (int nn2 = 0; nn2 < 5 && seq[mi2][nn2][0] > 0; nn2++) {
             int start = (int)(seq[mi2][nn2][1] * SR);
@@ -3888,6 +4032,7 @@ static void ensure_ambient(int mi) {
         110.0f, 98.0f, 164.8f, 87.3f, 73.4f, 61.7f, 82.4f, 130.8f,
         73.4f, 110.0f, 92.5f, 87.3f, 123.5f, 98.0f, 61.7f,
         116.5f, 146.8f, 82.4f, 87.3f, 98.0f, 110.0f, 98.0f, 220.0f, 73.4f,
+        82.4f,
     };
     double f = roots[mi];
     double lfo1 = 1.0 / AMBIENT_SECS, lfo2 = 3.0 / AMBIENT_SECS;
@@ -4030,6 +4175,11 @@ static bool thermo_reset_pending_ = false;
 static double thermo_beta_ = 0;
 static double thermo_confidence_ = 0;
 static long thermo_observations_ = 0;
+static long thermo_round_ = 0;
+static long thermo_proposals_ = 0;
+static long thermo_accepts_ = 0;
+static long thermo_rejects_ = 0;
+static long thermo_contradictions_ = 0;
 static double thermo_quality_ = 0;
 static char thermo_sampler_[8] = "idle";
 static uint64_t *thermo_snap_ = NULL;
@@ -4154,18 +4304,26 @@ static bool thermo_launch(void) {
     thermo_beta_ = 0;
     thermo_confidence_ = 0;
     thermo_observations_ = 0;
+    thermo_round_ = 0;
+    thermo_proposals_ = 0;
+    thermo_accepts_ = 0;
+    thermo_rejects_ = 0;
+    thermo_contradictions_ = 0;
     thermo_quality_ = 0;
     snprintf(thermo_sampler_, sizeof thermo_sampler_, "boot");
     signal(SIGPIPE, SIG_IGN);
 
     fprintf(thermo_in_, "{\"v\":1,\"t\":\"init\",\"mode\":");
     thermo_json_string(thermo_in_, MODES[g_mode_idx]);
+    QualityProfile profile = quality_profile();
     fprintf(thermo_in_, ",\"w\":%d,\"h\":%d,\"ntiles\":%d,\"seed\":%llu,"
                      "\"torus\":%s,\"smooth\":%s,\"form\":\"%s\",\"learn\":%s,"
-                     "\"unary\":[",
+                     "\"quality_focus\":",
             W_, H_, ntiles_, (unsigned long long)g_seed,
             g_torus ? "true" : "false", g_smooth ? "true" : "false", g_thermo_form,
             g_thermo_learn ? "true" : "false");
+    thermo_json_string(thermo_in_, profile.focus);
+    fputs(",\"unary\":[", thermo_in_);
     for (int i = 0; i < ntiles_; i++)
         fprintf(thermo_in_, "%s%.9g", i ? "," : "", tiles_[i].weight);
     fputs("],\"cdir\":[", thermo_in_);
@@ -4251,11 +4409,15 @@ static bool thermo_send_feedback(const int *cells, const int *tiles, int count,
                                  QualityMetrics before, QualityMetrics after) {
     if (!thermo_in_) return false;
     double reward = quality_reward(before, after, accepted, rejected);
+    QualityProfile profile = quality_profile();
     thermo_quality_ = after.total;
     fprintf(thermo_in_, "{\"v\":1,\"t\":\"feedback\",\"reward\":%.9g,"
                      "\"quality\":%.9g,\"accepted\":%d,\"rejected\":%d,"
-                     "\"contradictions\":%d,\"tile_events\":[",
-            reward, after.total, accepted, rejected, contradictions);
+                     "\"contradictions\":%d,\"quality_focus\":\"%s\","
+                     "\"metrics\":",
+            reward, after.total, accepted, rejected, contradictions, profile.focus);
+    quality_json(thermo_in_, after);
+    fputs(",\"tile_events\":[", thermo_in_);
     for (int i = 0; i < count; i++)
         fprintf(thermo_in_, "%s{\"index\":%d,\"value\":%.3g}",
                 i ? "," : "", tiles[i], accepted ? 1.0 : -1.0);
@@ -4330,10 +4492,15 @@ static bool thermo_apply_patch(const char *s) {
     int rejected = ok ? 0 : count;
     int contradictions = ok ? 0 : 1;
     if (!ok) memcpy(dom_, thermo_snap_, sizeof(uint64_t) * cells_n);
+    thermo_round_++;
+    thermo_proposals_ += count;
+    thermo_accepts_ += accepted;
+    thermo_rejects_ += rejected;
+    thermo_contradictions_ += contradictions;
     g_decided = 0;
     for (size_t i = 0; i < cells_n; i++) if (pc64(dom_[i]) == 1) g_decided++;
     QualityMetrics after = quality_measure(false);
-    g_quality_live = after.total;
+    quality_record(after);
     return thermo_send_feedback(cells, tiles, count, accepted, rejected,
                                 contradictions, before, after);
 }
@@ -4449,6 +4616,7 @@ static int thermo_poll(void) {
                     } else if (!strncmp(tp + 1, "stats", 5) && tp[6] == '"') {
                         const char *bp = json_str(s, "beta");
                         const char *cp = json_str(s, "confidence");
+                        thermo_round_ = json_num(s, "round", thermo_round_);
                         thermo_beta_ = bp ? strtod(bp, NULL) : thermo_beta_;
                         thermo_confidence_ = cp ? strtod(cp, NULL) : thermo_confidence_;
                         thermo_bad_ = json_num(s, "bad", thermo_bad_);
@@ -4512,17 +4680,19 @@ static void render_status(int vh, int ch) {
                              thermo_inflight_ ? "boot" :
                              pct == 100 ? "done" : "idle";
         const char *learning = g_thermo_learn ? "learn" : "ephem";
-        if (thermo_quality_ > 0.0 && g_quality_live >= 0.0) {
-            snprintf(core, sizeof core, "%s %3d%% | T/%s q%.2f o%ld %s",
-                     mode, pct, engine, thermo_quality_, thermo_observations_, learning);
+        if (g_quality_live >= 0.0) {
+            snprintf(core, sizeof core, "%s %3d%% | T/%s q%.2f o%ld/%ld P%d %s",
+                     mode, pct, engine, g_quality_live, thermo_observations_,
+                     thermo_round_, studio_pin_count_, learning);
         } else {
-            snprintf(core, sizeof core, "%s %3d%% | T/%s %s",
-                     mode, pct, engine, learning);
+            snprintf(core, sizeof core, "%s %3d%% | T/%s P%d %s",
+                     mode, pct, engine, studio_pin_count_, learning);
         }
-    } else if (pct == 100 && g_quality_live >= 0.0) {
-        snprintf(core, sizeof core, "%s %3d%% | classic q%.2f", mode, pct, g_quality_live);
+    } else if (g_quality_live >= 0.0) {
+        snprintf(core, sizeof core, "%s %3d%% | classic q%.2f P%d",
+                 mode, pct, g_quality_live, studio_pin_count_);
     } else {
-        snprintf(core, sizeof core, "%s %3d%% | classic", mode, pct);
+        snprintf(core, sizeof core, "%s %3d%% | classic P%d", mode, pct, studio_pin_count_);
     }
     if (now_ms() < g_note_until && g_note[0])
         snprintf(line, sizeof line, "%s | %s", core, g_note);
@@ -4540,15 +4710,118 @@ static void render_status(int vh, int ch) {
     fb_bg((RGB){0, 0, 0});
 }
 
+static bool save_report(const char *path) {
+    if (!path || !*path) return false;
+    QualityMetrics q = quality_measure(true);
+    quality_record(q);
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    fprintf(f, "{\"schema\":1,\"mode\":\"%s\",\"seed\":%llu,"
+               "\"dimensions\":{\"w\":%d,\"h\":%d},\"solver\":\"%s\","
+               "\"quality\":",
+            MODES[g_mode_idx], (unsigned long long)g_seed, W_, H_,
+            g_thermo ? "thermo" : "classic");
+    quality_json(f, q);
+    fprintf(f, ",\"thermo\":{\"enabled\":%s,\"sampler\":",
+            g_thermo ? "true" : "false");
+    thermo_json_string(f, thermo_sampler_);
+    fprintf(f, ",\"round\":%ld,\"observations\":%ld,\"proposals\":%ld,"
+               "\"accepted\":%ld,\"rejected\":%ld,\"contradictions\":%ld,"
+               "\"beta\":%.9g,\"confidence\":%.9g},"
+               "\"studio\":{\"pins\":%d}}\n",
+            thermo_round_, thermo_observations_, thermo_proposals_,
+            thermo_accepts_, thermo_rejects_, thermo_contradictions_,
+            thermo_beta_, thermo_confidence_, studio_pin_count_);
+    bool ok = ferror(f) == 0 && fclose(f) == 0;
+    if (!ok) return false;
+    return true;
+}
+
+static void render_observatory(void) {
+    QualityMetrics q = quality_measure(false);
+    QualityProfile profile = quality_profile();
+    const double *live[] = {
+        &g_quality_live, &g_quality_validity_live, &g_quality_boundary_live,
+        &g_quality_coverage_live, &g_quality_diversity_live,
+        &g_quality_smoothness_live, &g_quality_stability_live,
+        &g_quality_topology_live,
+    };
+    const double current[] = {
+        q.total, q.validity, q.boundary, q.coverage, q.diversity,
+        q.smoothness, q.stability, q.topology,
+    };
+    static const char *labels[] = {
+        "total", "validity", "boundary", "coverage", "diversity",
+        "smoothness", "stability", "topology",
+    };
+    static const char *spark[] = {" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇"};
+    char line[256];
+    fb_reset();
+    fb_puts("\x1b[H\x1b[2J");
+    fb_fg((RGB){150, 232, 255});
+    fb_puts("QUALITY OBSERVATORY\n\n");
+    fb_fg((RGB){210, 220, 232});
+    snprintf(line, sizeof line, "mode %-10s  focus %-10s  seed %llu  pins %d\n",
+             MODES[g_mode_idx], profile.focus, (unsigned long long)g_seed,
+             studio_pin_count_);
+    fb_puts(line);
+    snprintf(line, sizeof line, "solver %-7s  sampler %-8s  learning %-5s  beta %.2f  confidence %.2f\n",
+             g_thermo ? "thermo" : "classic", thermo_sampler_,
+             g_thermo_learn ? "on" : "off", thermo_beta_, thermo_confidence_);
+    fb_puts(line);
+    snprintf(line, sizeof line, "round %ld  observations %ld  proposals %ld  accepted %ld  rejected %ld  contradictions %ld\n\n",
+             thermo_round_, thermo_observations_, thermo_proposals_, thermo_accepts_,
+             thermo_rejects_, thermo_contradictions_);
+    fb_puts(line);
+    for (int i = 0; i < 8; i++) {
+        double value = *live[i] >= 0.0 ? *live[i] : current[i];
+        int filled = (int)round(20.0 * quality_clamp(value));
+        if (filled > 20) filled = 20;
+        snprintf(line, sizeof line, "%-10s %.3f  [", labels[i], value);
+        fb_puts(line);
+        fb_fg(i == 0 ? (RGB){255, 210, 110} : (RGB){126, 210, 180});
+        for (int j = 0; j < 20; j++) fb_puts(j < filled ? "#" : ".");
+        fb_fg((RGB){210, 220, 232});
+        fb_puts("]\n");
+    }
+    fb_puts("\ntrend ");
+    if (!g_quality_trace_len_) {
+        fb_puts("waiting for live samples");
+    } else {
+        int start = (g_quality_trace_pos_ - g_quality_trace_len_ + QUALITY_TRACE_N) % QUALITY_TRACE_N;
+        for (int i = 0; i < g_quality_trace_len_; i++) {
+            double value = quality_clamp(g_quality_trace_[(start + i) % QUALITY_TRACE_N]);
+            int level = (int)round(value * 7.0);
+            if (level < 0) level = 0;
+            if (level > 7) level = 7;
+            fb_puts(spark[level]);
+        }
+    }
+    fb_puts("\n\n");
+    fb_fg((RGB){150, 180, 205});
+    fb_puts("l return   P pin/unpin hover   right-click unpin   h help   q quit\n");
+    fb_puts("report: use --report FILE.json for reproducible quality + thermo + studio data");
+    fb_puts("\x1b[0m");
+    frame_begin();
+    fwrite(fb_, 1, fblen_, stdout);
+    frame_end();
+}
+
 /* key + mouse handling: returns request code 0 none, 1 new map, 2 quit */
 static uint64_t *snap_;
 
 #define UNDO_N 12
 static uint64_t *undo_[UNDO_N];
+static uint8_t *undo_pin_[UNDO_N];
+static uint8_t *undo_tile_[UNDO_N];
 static int undo_len_ = 0, undo_pos_ = 0;
 void click_bufs_invalidate(void) {
     free(snap_); snap_ = NULL;
-    for (int i = 0; i < UNDO_N; i++) { free(undo_[i]); undo_[i] = NULL; }
+    for (int i = 0; i < UNDO_N; i++) {
+        free(undo_[i]); undo_[i] = NULL;
+        free(undo_pin_[i]); undo_pin_[i] = NULL;
+        free(undo_tile_[i]); undo_tile_[i] = NULL;
+    }
     undo_len_ = 0; undo_pos_ = 0;
     hist_clear();
 }
@@ -4688,12 +4961,21 @@ static void fast_solve(void) {
     }
 }
 static bool undo_push(void) {
-    if (!snap_) return false;
     if (!undo_[undo_pos_]) {
         undo_[undo_pos_] = malloc(sizeof(uint64_t) * (size_t)W_ * H_);
         if (!undo_[undo_pos_]) return false;
     }
+    if (!undo_pin_[undo_pos_]) {
+        undo_pin_[undo_pos_] = malloc((size_t)W_ * H_);
+        if (!undo_pin_[undo_pos_]) return false;
+    }
+    if (!undo_tile_[undo_pos_]) {
+        undo_tile_[undo_pos_] = malloc((size_t)W_ * H_);
+        if (!undo_tile_[undo_pos_]) return false;
+    }
     memcpy(undo_[undo_pos_], dom_, sizeof(uint64_t) * (size_t)W_ * H_);
+    memcpy(undo_pin_[undo_pos_], studio_pin_, (size_t)W_ * H_);
+    memcpy(undo_tile_[undo_pos_], studio_tile_, (size_t)W_ * H_);
     undo_pos_ = (undo_pos_ + 1) % UNDO_N;
     if (undo_len_ < UNDO_N) undo_len_++;
     return true;
@@ -4703,9 +4985,85 @@ static bool undo_pop(void) {
     int previous = (undo_pos_ - 1 + UNDO_N) % UNDO_N;
     if (!undo_[previous]) return false;
     memcpy(dom_, undo_[previous], sizeof(uint64_t) * (size_t)W_ * H_);
+    if (undo_pin_[previous] && undo_tile_[previous]) {
+        memcpy(studio_pin_, undo_pin_[previous], (size_t)W_ * H_);
+        memcpy(studio_tile_, undo_tile_[previous], (size_t)W_ * H_);
+        studio_pin_count_ = 0;
+        for (int i = 0; i < W_ * H_; i++) studio_pin_count_ += studio_pin_[i] != 0;
+    }
     undo_pos_ = previous;
     undo_len_--;
+    quality_record(quality_measure(false));
     return true;
+}
+
+static uint64_t studio_neighbor_mask(int cx, int cy) {
+    uint64_t mask = grid_cell_mask(cx, cy);
+    for (int d = 0; d < NDIR; d++) {
+        int nx = cx, ny = cy;
+        if (d == 0) ny = g_torus ? (cy + H_ - 1) % H_ : cy - 1;
+        else if (d == 1) nx = g_torus ? (cx + 1) % W_ : cx + 1;
+        else if (d == 2) ny = g_torus ? (cy + 1) % H_ : cy + 1;
+        else nx = g_torus ? (cx + W_ - 1) % W_ : cx - 1;
+        if (nx < 0 || ny < 0 || nx >= W_ || ny >= H_) continue;
+        uint64_t neighbor = dom_[IDX(nx, ny)];
+        if (pc64(neighbor) != 1) continue;
+        int nt = __builtin_ctzll(neighbor);
+        for (int tile = 0; tile < ntiles_; tile++)
+            if (!((cdir_[d][tile] >> nt) & 1ULL)) mask &= ~(1ULL << tile);
+    }
+    return mask;
+}
+
+static bool studio_unpin_cell(int cx, int cy) {
+    if (!studio_pin_ || cx < 0 || cy < 0 || cx >= W_ || cy >= H_ ||
+        !studio_pin_[IDX(cx, cy)]) return false;
+    uint64_t mask = studio_neighbor_mask(cx, cy);
+    if (!mask || !undo_push()) return false;
+    int cell = IDX(cx, cy);
+    dom_[cell] = mask;
+    studio_pin_[cell] = 0;
+    studio_tile_[cell] = 0;
+    if (studio_pin_count_ > 0) studio_pin_count_--;
+    if (!propagate_from(cell)) {
+        (void)undo_pop();
+        return false;
+    }
+    quality_record(quality_measure(false));
+    if (g_thermo) thermo_kill();
+    return true;
+}
+
+static bool studio_pin_cell(int cx, int cy) {
+    if (!studio_pin_ || cx < 0 || cy < 0 || cx >= W_ || cy >= H_) return false;
+    int cell = IDX(cx, cy);
+    if (studio_pin_[cell]) return studio_unpin_cell(cx, cy);
+    uint64_t domain = dom_[cell];
+    if (!domain || !undo_push()) return false;
+    int tile = pc64(domain) == 1 ? __builtin_ctzll(domain) : weighted_pick(domain);
+    dom_[cell] = 1ULL << tile;
+    if (!propagate_from(cell)) {
+        (void)undo_pop();
+        return false;
+    }
+    studio_pin_[cell] = 1;
+    studio_tile_[cell] = (uint8_t)tile;
+    studio_pin_count_++;
+    quality_record(quality_measure(false));
+    if (g_thermo) thermo_kill();
+    return true;
+}
+
+static void studio_pin_hover(void) {
+    if (g_hover_x < 0 || g_hover_y < 0) {
+        set_note("hover a cell before pinning");
+        return;
+    }
+    bool was_pinned = studio_pin_[IDX(g_hover_x, g_hover_y)] != 0;
+    if (studio_pin_cell(g_hover_x, g_hover_y))
+        set_note(was_pinned ? "unpinned (%d,%d)" : "pinned (%d,%d)", g_hover_x, g_hover_y);
+    else
+        set_note(was_pinned ? "unpin refused" : "pin refused there");
 }
 static int mouse_esc = 0;      /* 0 normal, 1 got ESC, 2 got '[' */
 static char mouse_buf[32];
@@ -4727,6 +5085,11 @@ static void handle_click(int btn, int px, int py) {
     }
 
     if (btn & 2) { /* right-click: carve cell back open */
+        if (studio_pin_ && studio_pin_[cell]) {
+            bool unpinned = studio_unpin_cell(cx, cy);
+            set_note(unpinned ? "unpinned (%d,%d)" : "unpin refused", cx, cy);
+            return;
+        }
         if (pc64(dom_[cell]) == ntiles_ || pc64(dom_[cell]) == 0) return;
         memcpy(snap_, dom_, sizeof(uint64_t) * (size_t)W_ * H_);
         int cx2 = cell % W_, cy2 = cell / W_;
@@ -4823,7 +5186,30 @@ static int pump_keys(bool tty) {
             if (c == 'q' || c == 3) req = req == 1 ? 1 : 2;
             continue;
         }
+        if (g_observe) {
+            if (c == 'l') {
+                g_observe = false;
+                g_paused = g_observe_was_paused;
+                full_repaint_ = true;
+                fputs("\x1b[2J", stdout);
+            } else if (c == 'h' || c == '?') {
+                g_observe = false;
+                g_paused = g_observe_was_paused;
+                g_help = true;
+            } else if (c == 'q' || c == 3) {
+                g_observe = false;
+                req = req == 1 ? 1 : 2;
+            }
+            continue;
+        }
         if ((c == 'h' || c == '?') ) { g_help = true; continue; }
+        if (c == 'l') {
+            g_observe_was_paused = g_paused;
+            g_paused = true;
+            g_observe = true;
+            full_repaint_ = true;
+            continue;
+        }
         if (c == 'q' || c == 3) req = req == 1 ? 1 : 2;
         else if (c == ' ') { g_seed = rnd(); req = 1; }
         else if (c == 'p') g_paused = !g_paused;
@@ -4881,6 +5267,13 @@ static int pump_keys(bool tty) {
                                    (uint32_t)(g_seed & 0xffffffff), (uint32_t)(g_bias * 1000)};
                 bool ok = fwrite(hdr, 4, 5, f) == 5 &&
                           fwrite(dom_, sizeof(uint64_t), (size_t)W_ * H_, f) == (size_t)W_ * H_;
+                uint32_t pin_count = (uint32_t)studio_pin_count_;
+                if (ok) ok = fwrite(&pin_count, sizeof pin_count, 1, f) == 1;
+                for (int i2 = 0; ok && i2 < W_ * H_; i2++) {
+                    if (!studio_pin_[i2]) continue;
+                    uint32_t record[2] = {(uint32_t)i2, studio_tile_[i2]};
+                    ok = fwrite(record, sizeof record, 1, f) == 1;
+                }
                 if (fclose(f) != 0) ok = false;
                 set_note(ok ? "world saved (/tmp/wfc_world.bin)" : "save failed (disk?)");
             }
@@ -4890,20 +5283,58 @@ static int pump_keys(bool tty) {
             if (!f) { set_note("no saved world"); }
             else {
                 uint32_t hdr[5];
-                if (fread(hdr, 4, 5, f) == 5 && hdr[1] == (uint32_t)W_ && hdr[2] == (uint32_t)H_) {
+                if (fread(hdr, 4, 5, f) == 5 && hdr[0] < NMODES &&
+                    hdr[1] == (uint32_t)W_ && hdr[2] == (uint32_t)H_) {
                     setup_mode((int)hdr[0]);
                     g_bias = hdr[4] / 1000.0;
                     apply_bias();
                     if (fread(dom_, sizeof(uint64_t), (size_t)W_ * H_, f) != (size_t)W_ * H_) {
                         set_note("truncated save");
                     } else {
+                        memset(studio_pin_, 0, (size_t)W_ * H_);
+                        memset(studio_tile_, 0, (size_t)W_ * H_);
+                        studio_pin_count_ = 0;
+                        uint32_t pin_count = 0;
+                        bool pin_ok = true;
+                        size_t pin_header = fread(&pin_count, sizeof pin_count, 1, f);
+                        if (pin_header == 1) {
+                            uint32_t records = pin_count;
+                            if (records > (uint32_t)(W_ * H_)) {
+                                pin_ok = false;
+                                records = 0;
+                            }
+                            for (uint32_t p2 = 0; p2 < records; p2++) {
+                                uint32_t record[2];
+                                if (fread(record, sizeof record, 1, f) != 1) { pin_ok = false; break; }
+                                if (record[0] >= (uint32_t)(W_ * H_) || record[1] >= (uint32_t)ntiles_ ||
+                                    pc64(dom_[record[0]]) != 1 ||
+                                    (uint32_t)__builtin_ctzll(dom_[record[0]]) != record[1] ||
+                                    studio_pin_[record[0]]) {
+                                    pin_ok = false;
+                                    continue;
+                                }
+                                studio_pin_[record[0]] = 1;
+                                studio_tile_[record[0]] = (uint8_t)record[1];
+                                studio_pin_count_++;
+                            }
+                        } else if (ferror(f)) pin_ok = false;
+                        if (!pin_ok) {
+                            memset(studio_pin_, 0, (size_t)W_ * H_);
+                            memset(studio_tile_, 0, (size_t)W_ * H_);
+                            studio_pin_count_ = 0;
+                        }
                         hist_clear(); /* scrub history predates this load */
                         g_comp_ready = false;
                         n_river_ = 0; g_river_show = 0;
                         memset(river_, 0, (size_t)W_ * H_);
-                        for (int i2 = 0; i2 < W_ * H_; i2++) river_rank_[i2] = -1;
-                        g_decided = W_ * H_;
-                        set_note("world loaded");
+                        g_decided = 0;
+                        for (int i2 = 0; i2 < W_ * H_; i2++) {
+                            river_rank_[i2] = -1;
+                            if (pc64(dom_[i2]) == 1) g_decided++;
+                        }
+                        quality_record(quality_measure(false));
+                        set_note(pin_ok ? "world loaded (%d pins)" : "world loaded; pin metadata ignored",
+                                 studio_pin_count_);
                     }
                 } else set_note("incompatible save");
                 fclose(f);
@@ -4961,6 +5392,7 @@ static int pump_keys(bool tty) {
                 set_note("thermo learning will reset on next run");
             }
         }
+        else if (c == 'P') studio_pin_hover();
         else if (c == 'I') { /* slow-mo: quarter pace while solving */            g_slowmo = !g_slowmo;
             full_repaint_ = true;
         }
@@ -5144,7 +5576,7 @@ int main(int argc, char **argv) {
             const char *m = NEXTV();
             int found = -1;
             for (int k = 0; k < NMODES; k++) if (!strcmp(m, MODES[k])) found = k;
-            if (found < 0) { fprintf(stderr, "mode must be circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium\n"); return 2; }
+            if (found < 0) { fprintf(stderr, "mode must be circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium|delta\n"); return 2; }
             setup_mode(found);
         }
         else if (!strcmp(argv[i], "--w")) {
@@ -5268,15 +5700,24 @@ int main(int argc, char **argv) {
             g_zoom = (int)value;
         }
         else if (!strcmp(argv[i], "--save")) { snprintf(g_save_path, sizeof g_save_path, "%s", NEXTV()); g_save_auto = true; }
+        else if (!strcmp(argv[i], "--report")) {
+            const char *report = NEXTV();
+            if (!*report || strlen(report) >= sizeof g_report_path) {
+                fprintf(stderr, "invalid value for --report\n");
+                return 2;
+            }
+            snprintf(g_report_path, sizeof g_report_path, "%s", report);
+        }
         else if (!strcmp(argv[i], "--gif")) { snprintf(g_gif_path, sizeof g_gif_path, "%s", NEXTV()); g_gif_on = 1; }
-        else if (!strcmp(argv[i], "--version")) { printf("wfc 5.2 \u2014 twenty-four worlds\n"); return 0; }
+        else if (!strcmp(argv[i], "--version")) { printf("wfc 5.2 \u2014 twenty-five worlds\n"); return 0; }
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             printf("wave function collapse, animated in your terminal\n\n"
-                   "  --mode circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium  tileset\n"
+                   "  --mode circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium|delta  tileset\n"
                    "  --w N --h N                      grid cells (default: auto-fit window)\n"
                    "  --seed N|word                    rng seed (words are hashed)\n"
                    "  --speed N                        collapse steps/sec (default 1600)\n"
                    "  --save FILE.png|.bmp             auto-save map on completion\n"
+                   "  --report FILE.json               quality + thermo + studio report\n"
                    "  --solver classic|thermo         collapse engine (thermo = adaptive sidecar)\n"
                    "  --no-learn                       disable persistent thermo preferences\n"
                    "  --thermo-profile DIR             store thermo profiles in DIR\n"
@@ -5303,7 +5744,8 @@ int main(int argc, char **argv) {
                    "  --once                           exit after first map\n\n"
                    "keys: space new | m mode | y theme | c cycle | a audio | h help\n"
                    "      i iso | , . scrub collapse | wasd hero in dungeon\n"
-                   "      click=seed right-click=carve +/- speed p pause g gif s save q quit\n"
+                   "      l observatory | P pin/unpin hover | click=seed right-click=carve\n"
+                   "      +/- speed p pause g gif s save q quit\n"
                    "build: cc -O2 -std=c11 -o wfc wfc.c -lz\n");
             return 0;
         }
@@ -5469,22 +5911,29 @@ int main(int argc, char **argv) {
             fprintf(stderr, "\nmoist:");
             for (int k = 0; k < 5; k++) fprintf(stderr, " %d:%.0f%%", k, 100.0 * em[k] / (W_ * H_));
             fprintf(stderr, "\n");
-            QualityMetrics qm = quality_measure(true);
-            g_quality_live = qm.total;
+        }
+        QualityMetrics qm = quality_measure(true);
+        quality_record(qm);
+        if (getenv("WFC_DEBUG")) {
             double qr = quality_reward((QualityMetrics){0}, qm, W_ * H_, 0);
             fprintf(stderr, "quality=%.3f validity=%.3f boundary=%.3f coverage=%.3f diversity=%.3f "
-                            "smoothness=%.3f topology=%.3f reward=%+.3f\n",
+                            "smoothness=%.3f stability=%.3f topology=%.3f focus=%s reward=%+.3f\n",
                     qm.total, qm.validity, qm.boundary, qm.coverage, qm.diversity,
-                    qm.smoothness, qm.topology, qr);
+                    qm.smoothness, qm.stability, qm.topology, quality_profile().focus, qr);
         }
         if (g_save_path[0] && !save_image(g_save_path)) {
             fprintf(stderr, "failed to save %s\n", g_save_path);
             return 1;
         }
-        printf("OK mode=%s %dx%d seed=%llu tries=%d steps=%ld%s%s%s%s\n",
+        if (g_report_path[0] && !save_report(g_report_path)) {
+            fprintf(stderr, "failed to write report %s: %s\n", g_report_path, strerror(errno));
+            return 1;
+        }
+        printf("OK mode=%s %dx%d seed=%llu tries=%d steps=%ld%s%s%s%s%s%s\n",
                MODES[g_mode_idx], W_, H_, (unsigned long long)g_seed, tries, total,
                g_save_path[0] ? " saved=" : "", g_save_path[0] ? g_save_path : "",
-               g_gif_on ? " gif=" : "", g_gif_on ? gp : "");
+               g_gif_on ? " gif=" : "", g_gif_on ? gp : "",
+               g_report_path[0] ? " report=" : "", g_report_path[0] ? g_report_path : "");
         return 0;
     }
 
@@ -5539,6 +5988,7 @@ inf_continue:
             if (g_stop) break;
             if (req == 1) break;
             if (g_help) { if (!g_gfx) render_help(); msleep(50); continue; }
+            if (g_observe) { if (!g_gfx) render_observatory(); msleep(80); continue; }
             if (g_sheet_opened && !g_gfx) { render_sheet(); msleep(500); continue; }
             if (g_paused) { if (!g_gfx) render_frame(steps, attempts, 1.0); msleep(40); continue; }
             if (g_nworlds > 1) {
@@ -5621,7 +6071,7 @@ inf_continue:
             if (g_sound) { ensure_sfx(); play_sfx("/tmp/wfc_done.wav"); }
             int is_terrain = !strcmp(MODES[g_mode_idx], "terrain");
             load_world(0);
-            g_quality_live = quality_measure(true).total;
+            quality_record(quality_measure(true));
             if ((!strcmp(MODES[g_mode_idx], "circuit") || !strcmp(MODES[g_mode_idx], "pipes")) && !g_stop && g_nworlds == 1) label_components();
             if (is_terrain && !g_stop && g_nworlds == 1) {
                 if (g_inf) rivers_clear();
@@ -5656,6 +6106,10 @@ inf_continue:
             if (g_save_auto && g_save_path[0]) {
                 if (save_image(g_save_path)) set_note("saved %s", g_save_path);
                 else set_note("save failed: %s", g_save_path);
+            }
+            if (g_report_path[0]) {
+                if (save_report(g_report_path)) set_note("report saved %s", g_report_path);
+                else set_note("report failed: %s", g_report_path);
             }
             double t0 = now_ms();
             bool anim = !strcmp(MODES[g_mode_idx], "fire") || !strcmp(MODES[g_mode_idx], "waves")
@@ -5734,7 +6188,13 @@ inf_continue:
     free(thermo_lbuf);
     free(gif_kids);
     free(snap_);
-    for (int i = 0; i < UNDO_N; i++) free(undo_[i]);
+    for (int i = 0; i < UNDO_N; i++) {
+        free(undo_[i]);
+        free(undo_pin_[i]);
+        free(undo_tile_[i]);
+    }
+    free(studio_pin_);
+    free(studio_tile_);
     hist_clear();
     return 0;
 }

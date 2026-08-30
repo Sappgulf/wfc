@@ -82,6 +82,32 @@ class LearnerTests(unittest.TestCase):
         self.assertEqual(len(reset["pair_bias"]), 12)
         self.assertEqual(len(reset["context_bias"]), 5)
 
+    def test_metric_history_is_bounded_and_persisted(self):
+        path = self.tmp_path / "metrics.json"
+        state = new_state(2, 4, 3)
+        for _ in range(70):
+            update_state(
+                state,
+                0.2,
+                [], [], [],
+                metrics={"total": 0.7, "topology": 0.8, "focus": "delta"},
+            )
+        self.assertEqual(len(state["metrics_history"]), 64)
+        save_profile(str(path), "delta", "beef", state)
+        loaded = load_profile(str(path), "delta", "beef", 2, 4, 3)
+        self.assertEqual(len(loaded["metrics_history"]), 64)
+        self.assertEqual(loaded["metrics_history"][-1]["focus"], "delta")
+
+    def test_metric_history_rejects_non_finite_values(self):
+        state = new_state(1, 1)
+        with self.assertRaises(ValueError):
+            update_state(
+                state,
+                0.0,
+                [], [], [],
+                metrics={"total": float("nan")},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

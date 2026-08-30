@@ -242,7 +242,7 @@ less than a valid map with healthy diversity.
 
 ## New modes
 
-The mode count becomes 24. All three modes use connector-oriented tiles so
+The mode count becomes 25. The four newest modes use connector-oriented tiles so
 they exercise the learned pair/context terms while keeping the tile budget
 under `MAXT`.
 
@@ -309,7 +309,7 @@ The implementation must add or update tests for:
 5. Deterministic classic and `--no-learn` runs for fixed seeds.
 6. Adaptive thermo produces at least one intermediate proposal on a supported
    test grid when THRML is available.
-7. All 24 modes solve in classic mode across seed sweeps.
+7. All 25 modes solve in classic mode across seed sweeps.
 8. New mode renderers, GIF/PNG exports, and terminal paths under sanitizers.
 9. Headless fallback when Python/THRML is unavailable.
 10. A bounded benchmark comparing classic, thermo, and adaptive thermo memory.
@@ -324,7 +324,7 @@ window only.
    classic behavior.
 2. Add the versioned persistent sidecar protocol and C patch transaction path.
 3. Add the tile/pair/context learner and adaptive annealing.
-4. Add the three modes, renderers, animation clocks, docs, and HUD.
+4. Add the four connector modes, renderers, animation clocks, docs, and HUD.
 5. Add focused regression/sidecar tests, run the complete verification suite,
    inspect the diff, commit, and push the finished implementation.
 
@@ -333,6 +333,6 @@ window only.
 The work is complete when a Terminal.app run of adaptive thermo visibly accepts
 multiple safe proposals during one map, reports changing quality/confidence
 metrics, updates a bounded per-mode profile, and still produces a valid map;
-all 24 modes remain usable; classic and no-learning determinism hold; the full
+all 25 modes remain usable; classic and no-learning determinism hold; the full
 verification suite passes; and the final implementation is committed and
 pushed without including unrelated pre-existing changes.

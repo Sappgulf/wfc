@@ -93,6 +93,22 @@ class ProtocolContractTests(unittest.TestCase):
         send(proc, {"v": 1, "t": "stop"})
         self.assertEqual(proc.wait(timeout=2), 0)
 
+    def test_quality_focus_and_metrics_are_validated_without_learning(self):
+        proc = self.launch_worker(REAL_WORKER)
+        payload = init_payload()
+        payload["quality_focus"] = "streets"
+        payload["learn"] = False
+        send(proc, payload)
+        ready = read_event(proc)
+        self.assertEqual(ready["quality_focus"], "streets")
+        send(proc, {
+            "v": 1, "t": "feedback", "reward": 0.0,
+            "metrics": {"total": 2.0},
+            "tile_events": [], "pair_events": [], "context_events": [],
+        })
+        self.assertEqual(read_event(proc)["t"], "fatal")
+        self.assertEqual(proc.wait(timeout=2), 1)
+
     def test_real_worker_learns_incrementally_and_persists_profile(self):
         with tempfile.TemporaryDirectory() as profile_dir:
             proc = self.launch_worker(REAL_WORKER)
@@ -115,10 +131,15 @@ class ProtocolContractTests(unittest.TestCase):
                             "contradictions": 0, "tile_events": [
                                 {"index": item["tile"], "value": 1.0}],
                             "pair_events": [], "context_events": [],
+                            "quality_focus": "streets",
+                            "metrics": {"total": 0.8, "topology": 0.7,
+                                        "focus": "streets"},
                             "final": False})
                 learned = read_event(proc)
                 self.assertEqual(learned["t"], "learn")
                 self.assertEqual(learned["observations"], _ + 1)
+                self.assertEqual(learned["metrics"]["focus"], "streets")
+                self.assertEqual(learned["metrics_history_count"], _ + 1)
             send(proc, {"v": 1, "t": "sample", "domains": domains,
                         "budget": 4, "beta_target": 2.0})
             done = read_event(proc)
