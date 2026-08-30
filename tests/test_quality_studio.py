@@ -113,6 +113,8 @@ class QualityStudioTests(unittest.TestCase):
         self.assertIn("E evolution", result.stdout)
         self.assertIn("--evolve N", result.stdout)
         self.assertIn("--fullscreen", result.stdout)
+        self.assertIn("/ pick world", result.stdout)
+        self.assertIn("[ ] density", result.stdout)
 
     def test_every_registered_mode_solves_and_exports(self):
         """Each row in MODESPEC[] must solve headlessly and survive an export.
@@ -153,6 +155,25 @@ class QualityStudioTests(unittest.TestCase):
                 payload = json.loads(report.read_text(encoding="utf-8"))
                 self.assertNotEqual(payload["macro"]["name"], "none", mode)
                 self.assertGreater(payload["macro"]["guided_cells"], 0, mode)
+
+    def test_modes_flag_prints_a_blurb_for_every_world(self):
+        """--modes renders the registry, so the CLI cannot drift from it."""
+        names = self.run_wfc("--list-modes").stdout.split()
+        result = self.run_wfc("--modes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = [l for l in result.stdout.splitlines() if l.strip()]
+        self.assertEqual(len(lines), len(names))
+        for name, line in zip(names, lines):
+            self.assertTrue(line.startswith(name), line)
+            self.assertGreater(len(line[len(name):].strip()), 8, "blurb missing")
+
+    def test_density_flag_is_range_checked(self):
+        self.assertEqual(self.run_wfc("--density", "50", "--mode", "streets",
+                                      "--w", "8", "--h", "6", "--once").returncode, 0)
+        for bad in ("0", "200", "abc"):
+            result = self.run_wfc("--density", bad, "--once")
+            self.assertEqual(result.returncode, 2, bad)
+            self.assertIn("--density", result.stderr)
 
     def test_help_lists_every_registered_mode(self):
         """--help renders the mode list from MODES[], so it cannot go stale."""

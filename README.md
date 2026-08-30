@@ -47,12 +47,14 @@ make
 | vinyl    | concentric grooves under a sweeping highlight    |
 | loom     | warp and weft crossing over and under on the web |
 
-Press `m` to cycle, `z` for the all-worlds sheet, `r` for the raytraced
-heightfield view, `i` for the isometric relief view of any solved world.
+Press `/` to open the world picker — type to filter, arrows to move, enter to
+go. `m` steps to the next world, `z` shows the all-worlds sheet, `r` the
+raytraced heightfield view, `i` the isometric relief view of any solved world.
 
 ## Keys
 
-`space` new · `m` mode · `y` theme · `z` sheet · `[` / `]` density ·
+`/` pick a world (type to filter) · `space` new · `m` next world · `y` theme ·
+`z` sheet · `[` / `]` density ·
 `+` / `-` speed · `I` slow-mo · `p` pause · `e` entropy view ·
 `g` gif · `c` auto-cycle · `s` save png · `a` audio · `o` share link ·
 `v` clipboard shot · `k` CRT · `f` drift cam · `W`/`L` world save/load ·
@@ -81,6 +83,8 @@ Mouse: left-click seed, right-click carve or unpin, drag paint, hover inspect.
 --report out.json       quality, thermo, and studio observatory report
 --gallery out.html  all-mode web showcase
 --collage out.png    mosaic of all worlds
+--modes              every world with its one-line design note
+--density N          how full a world packs, 4-96 (same as [ ])
 --bench      performance table
 --evolve N   rank 2-8 deterministic variants (classic single-world)
 --pan        camera drift

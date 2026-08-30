@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <fcntl.h>
+#include <ctype.h>
 #include <math.h>
 #include <poll.h>
 #include <signal.h>
@@ -234,6 +235,10 @@ static uint32_t anim_epoch(void) {
 static int g_bulk_idx = -1;
 static bool g_cycle = false;
 static bool g_help = false;
+static bool g_picker = false;          /* the world picker overlay */
+static bool g_picker_was_paused = false;
+static int g_picker_sel = 0;
+static char g_picker_query[24] = "";
 static bool g_observe = false;
 static bool g_observe_was_paused = false;
 static volatile sig_atomic_t g_winch = 0;
@@ -2097,12 +2102,9 @@ static void render_help(void) {
     static const char *lines[] = {
         "  W A V E   F U N C T I O N   C O L L A P S E  ",
         "",
-        "  modes: circuit terrain truchet fire waves dungeon",
-        "  maze galaxy city aurora matrix pipes mondrian",
-        "  koi lava sakura geode lantern dunes",
-        "  reef stained streets neurons mycelium delta",
+        "  /       pick a world        m     next mode",
         "",
-        "  space   new map              m     next mode",
+        "  space   new map              [ ]   density",
         "  y       color theme          c     auto-cycle modes",
         "  +/-     collapse speed       p     pause",
         "  g       record gif           s     save image",
@@ -5606,6 +5608,76 @@ static bool save_report(const char *path) {
     return true;
 }
 
+/* Subsequence match, so "sak" finds sakura and "gly" does not. Case folded. */
+static bool picker_matches(const char *name, const char *query) {
+    for (const char *q = query; *q; q++) {
+        int want = tolower((unsigned char)*q);
+        while (*name && tolower((unsigned char)*name) != want) name++;
+        if (!*name) return false;
+        name++;
+    }
+    return true;
+}
+
+/* Fill `out` with the indices of worlds matching the query; returns the count.
+ * With no query every world matches, so the picker doubles as the mode list. */
+static int picker_collect(int *out, int cap) {
+    int n = 0;
+    for (int i = 0; i < NMODES && n < cap; i++)
+        if (picker_matches(MODESPEC[i].name, g_picker_query)) out[n++] = i;
+    return n;
+}
+
+static void render_picker(void) {
+    int hits[NMODES];
+    int n = picker_collect(hits, NMODES);
+    if (g_picker_sel >= n) g_picker_sel = n ? n - 1 : 0;
+    if (g_picker_sel < 0) g_picker_sel = 0;
+    char line[256];
+    fb_reset();
+    fb_puts("\x1b[H\x1b[2J");
+    fb_fg((RGB){150, 232, 255});
+    fb_puts("PICK A WORLD\n\n");
+    fb_fg((RGB){245, 220, 120});
+    snprintf(line, sizeof line, "  search: %s\xe2\x96\x88\n\n", g_picker_query);
+    fb_puts(line);
+    if (!n) {
+        fb_fg((RGB){244, 120, 110});
+        fb_puts("  no world matches\n");
+    }
+    /* keep the selection on screen when the terminal is short */
+    struct winsize ws = {0};
+    int trows = 24;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0) trows = ws.ws_row;
+    int rows = trows > 12 ? trows - 9 : 6;
+    int first = 0;
+    if (n > rows) {
+        first = g_picker_sel - rows / 2;
+        if (first < 0) first = 0;
+        if (first > n - rows) first = n - rows;
+    }
+    for (int k = first; k < n && k < first + rows; k++) {
+        const ModeSpec *m = &MODESPEC[hits[k]];
+        bool sel = k == g_picker_sel, cur = hits[k] == g_mode_idx;
+        fb_fg(sel ? (RGB){20, 24, 30} : cur ? (RGB){245, 200, 90} : (RGB){206, 214, 226});
+        if (sel) { snprintf(line, sizeof line, "\x1b[48;2;150;232;255m"); fb_puts(line); }
+        snprintf(line, sizeof line, " %s %-9s %-46s ",
+                 cur ? "\xe2\x97\x8f" : " ", m->name, m->blurb);
+        fb_puts(line);
+        if (sel) fb_puts("\x1b[49m");
+        fb_puts("\n");
+    }
+    fb_fg((RGB){120, 132, 148});
+    snprintf(line, sizeof line,
+             "\n  %d/%d worlds   type to filter   up/down select   enter go   esc cancel\n",
+             n, NMODES);
+    fb_puts(line);
+    fb_puts("\x1b[0m");
+    frame_begin();
+    fwrite(fb_, 1, fblen_, stdout);
+    frame_end();
+}
+
 static void render_observatory(void) {
     QualityMetrics q = quality_measure(false);
     QualityProfile profile = quality_profile();
@@ -6175,16 +6247,43 @@ static void toggle_fullscreen_fit(void) {
     set_note("fullscreen fit %s [%dx%d]", g_fullscreen ? "ON" : "off", W_, H_);
 }
 
+/* Keys that arrive as escape sequences, mapped above the byte range.
+ * Before this, ESC put the reader into the mouse state machine and any
+ * cursor key left it stuck there until an unrelated 'M' or 32 more bytes
+ * arrived — arrows jammed input entirely. */
+enum { KEY_ESC = 256, KEY_UP, KEY_DOWN, KEY_RIGHT, KEY_LEFT };
+
 static int pump_keys(bool tty) {
     if (!tty) return 0;
     int req = 0;
     unsigned char c;
-    while (read(STDIN_FILENO, &c, 1) == 1) {
+    int key, pushback = -1;
+    for (;;) {
+        if (pushback >= 0) { key = pushback; pushback = -1; c = (unsigned char)key; }
+        else {
+        if (read(STDIN_FILENO, &c, 1) != 1) break;
+        key = c;
         if (mouse_esc == 1) {
-            mouse_esc = c == '[' ? 2 : 0;
-            continue;
+            if (c == '[') { mouse_esc = 2; mouse_len = 0; continue; }
+            /* a bare ESC: deliver it, then let the next byte stand on its own */
+            mouse_esc = 0;
+            pushback = c;
+            key = KEY_ESC;
+            c = 0;
+            goto dispatch;
         }
         if (mouse_esc == 2) {
+            if (c >= 0x40 && c <= 0x7E && c != 'M' && c != 'm') {
+                mouse_esc = 0;              /* final byte of some other CSI */
+                if (mouse_len != 0) continue;
+                if (c == 'A') key = KEY_UP;
+                else if (c == 'B') key = KEY_DOWN;
+                else if (c == 'C') key = KEY_RIGHT;
+                else if (c == 'D') key = KEY_LEFT;
+                else continue;
+                c = 0;
+                goto dispatch;
+            }
             if (c == 'M' || c == 'm') {
                 mouse_buf[mouse_len] = 0;
                 int btn = 0, mx = 0, my = 0;
@@ -6224,16 +6323,58 @@ static int pump_keys(bool tty) {
                         handle_click(btn & 3, mx, my);
                 }
                 mouse_esc = 0;
-            } else if (mouse_len < (int)sizeof mouse_buf - 1) {
-                mouse_buf[mouse_len++] = (char)c;
-            } else mouse_esc = 0;
+                continue;
+            }
+            if (mouse_len < (int)sizeof mouse_buf - 1) mouse_buf[mouse_len++] = (char)c;
+            else mouse_esc = 0;
             continue;
         }
         if (c == 0x1b) { mouse_esc = 1; mouse_len = 0; continue; }
+        }
+    dispatch:
+        (void)key;
         if (g_help) {
             g_help = false;
             fputs("\x1b[2J", stdout);
             if (c == 'q' || c == 3) req = req == 1 ? 1 : 2;
+            continue;
+        }
+        if (g_picker) {
+            int hits[NMODES];
+            int n = picker_collect(hits, NMODES);
+            if (key == KEY_ESC || c == 3) {
+                g_picker = false;
+                g_paused = g_picker_was_paused;
+                full_repaint_ = true;
+                fputs("\x1b[2J", stdout);
+            } else if (key == KEY_UP) {
+                if (n) g_picker_sel = (g_picker_sel + n - 1) % n;
+            } else if (key == KEY_DOWN) {
+                if (n) g_picker_sel = (g_picker_sel + 1) % n;
+            } else if (c == '\r' || c == '\n') {
+                g_picker = false;
+                g_paused = g_picker_was_paused;
+                if (n) {
+                    setup_mode(hits[g_picker_sel < n ? g_picker_sel : 0]);
+                    g_seed = rnd();
+                    apply_size();
+                    if (g_sound) play_stinger(g_mode_idx);
+                    req = 1;
+                }
+                full_repaint_ = true;
+                fputs("\x1b[2J", stdout);
+            } else if (c == 127 || c == 8) {
+                size_t len = strlen(g_picker_query);
+                if (len) g_picker_query[len - 1] = 0;
+                g_picker_sel = 0;
+            } else if (c >= 32 && c < 127) {
+                size_t len = strlen(g_picker_query);
+                if (len + 1 < sizeof g_picker_query) {
+                    g_picker_query[len] = (char)c;
+                    g_picker_query[len + 1] = 0;
+                    g_picker_sel = 0;
+                }
+            }
             continue;
         }
         if (g_observe) {
@@ -6281,6 +6422,16 @@ static int pump_keys(bool tty) {
                 g_evolve_view = false;
                 req = req == 1 ? 1 : 2;
             }
+            continue;
+        }
+        if (c == '/' || c == 'M') {
+            /* thirty-three worlds is too many to reach by pressing `m` */
+            g_picker_was_paused = g_paused;
+            g_paused = true;
+            g_picker = true;
+            g_picker_query[0] = 0;
+            g_picker_sel = g_mode_idx;
+            full_repaint_ = true;
             continue;
         }
         if ((c == 'h' || c == '?') ) { g_help = true; continue; }
@@ -6741,6 +6892,20 @@ int main(int argc, char **argv) {
             snprintf(g_thermo_profile, sizeof g_thermo_profile, "%s", profile);
         }
         else if (!strcmp(argv[i], "--reset-learning")) g_thermo_reset_learning = true;
+        else if (!strcmp(argv[i], "--modes")) {
+            for (int k = 0; k < NMODES; k++)
+                printf("%-9s %s\n", MODESPEC[k].name, MODESPEC[k].blurb);
+            return 0;
+        }
+        else if (!strcmp(argv[i], "--density")) {
+            long value;
+            const char *v = NEXTV();
+            if (!parse_long_range(v, 4, 96, &value)) {
+                fprintf(stderr, "invalid value for --density: %s (expected 4-96)\n", v);
+                return 2;
+            }
+            g_bias = value / 100.0;
+        }
         else if (!strcmp(argv[i], "--once")) g_once = true;
         else if (!strcmp(argv[i], "--cycle")) g_cycle = true;
         else if (!strcmp(argv[i], "--zen")) g_zen = true;
@@ -6852,6 +7017,8 @@ int main(int argc, char **argv) {
                    "  --zen                            worlds dissolve into each other, never restarts\n"
                    "  --theme N                        color theme 0-7 (same as y)\n"
                    "  --list-modes                     print all mode names and exit\n"
+                   "  --modes                          print each world with its blurb\n"
+                   "  --density N                      how full a world packs, 4-96 (same as [ ])\n"
                    "  --sound                          synth sound effects (afplay)\n"
                    "  --gallery FILE.html              render all modes to a web showcase\n"
                    "  --gfx / --no-gfx                 inline-image rendering (iTerm2/WezTerm/kitty)\n"
@@ -6868,7 +7035,8 @@ int main(int argc, char **argv) {
                    "  --collage FILE.png               mosaic of all modes\n"
                    "  --daycycle                       terrain dawn/noon/dusk cycle\n"
                    "  --once                           exit after first map\n\n"
-                   "keys: space new | m mode | y theme | c cycle | a audio | h help\n"
+                   "keys: space new | / pick world | m next mode | y theme | c cycle\n"
+                   "      [ ] density | a audio | h help\n"
                    "      i iso | , . scrub collapse | wasd hero in dungeon\n"
                    "      l observatory | Q heatmap | E evolution | P pin/unpin hover\n"
                    "      F fullscreen fit | +/- speed p pause g gif s save q quit\n"
@@ -7138,6 +7306,7 @@ inf_continue:
             if (g_stop) break;
             if (req == 1) break;
             if (g_help) { if (!g_gfx) render_help(); msleep(50); continue; }
+            if (g_picker) { if (!g_gfx) render_picker(); msleep(50); continue; }
             if (g_observe) { if (!g_gfx) render_observatory(); msleep(80); continue; }
             if (g_evolve_view) { if (!g_gfx) render_evolution_lab(); msleep(80); continue; }
             if (g_sheet_opened && !g_gfx) { render_sheet(); msleep(500); continue; }
