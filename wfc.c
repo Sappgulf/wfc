@@ -1499,6 +1499,18 @@ static void quality_delta_json(FILE *f, QualityMetrics before, QualityMetrics af
     fputc('}', f);
 }
 
+/* profile-weighted scalar the thermo guard ranks two candidate states by.
+ * same blend quality_reward() uses, so accepting a patch and rewarding it
+ * agree on what "better" means. */
+static double quality_objective(QualityMetrics q) {
+    QualityProfile p = quality_profile();
+    double weighted = p.validity * q.validity + p.boundary * q.boundary +
+                      p.coverage * q.coverage + p.diversity * q.diversity +
+                      p.smoothness * q.smoothness + p.stability * q.stability +
+                      p.topology * q.topology;
+    return 0.75 * weighted + 0.25 * q.total;
+}
+
 static double quality_reward(QualityMetrics before, QualityMetrics after,
                              int accepted, int rejected) {
     if (accepted < 0) accepted = 0;
@@ -4506,8 +4518,11 @@ static long thermo_rejects_ = 0;
 static long thermo_contradictions_ = 0;
 static double thermo_quality_ = 0;
 static char thermo_sampler_[8] = "idle";
+static long thermo_displaced_ = 0;
 static uint64_t *thermo_snap_ = NULL;
 static size_t thermo_snap_cap_ = 0;
+static uint64_t *thermo_try_ = NULL;
+static size_t thermo_try_cap_ = 0;
 
 static void thermo_kill(void) {
     if (thermo_in_) { fclose(thermo_in_); thermo_in_ = NULL; thermo_in_fd_ = -1; }
@@ -4632,6 +4647,7 @@ static bool thermo_launch(void) {
     thermo_proposals_ = 0;
     thermo_accepts_ = 0;
     thermo_rejects_ = 0;
+    thermo_displaced_ = 0;
     thermo_contradictions_ = 0;
     thermo_quality_ = 0;
     snprintf(thermo_sampler_, sizeof thermo_sampler_, "boot");
@@ -4830,6 +4846,47 @@ static bool thermo_apply_patch(const char *s) {
     int rejected = ok ? 0 : count;
     int contradictions = ok ? 0 : 1;
     if (!ok) memcpy(dom_, thermo_snap_, sizeof(uint64_t) * cells_n);
+    QualityMetrics after = ok ? quality_measure(false) : before;
+    if (ok) {
+        /* counterfactual guard: keep the sidecar's assignment only when it
+         * beats the tiles the classic heuristic would have laid in the same
+         * cells. legal-but-bland proposals otherwise displace better classic
+         * picks and drag --solver thermo below --solver classic. */
+        if (thermo_try_cap_ < cells_n) {
+            uint64_t *next = realloc(thermo_try_, sizeof(uint64_t) * cells_n);
+            if (!next) {
+                memcpy(dom_, thermo_snap_, sizeof(uint64_t) * cells_n);
+                return false;
+            }
+            thermo_try_ = next;
+            thermo_try_cap_ = cells_n;
+        }
+        memcpy(thermo_try_, dom_, sizeof(uint64_t) * cells_n);
+        memcpy(dom_, thermo_snap_, sizeof(uint64_t) * cells_n);
+        /* the baseline draw runs on a derived stream and restores rs_, so the
+         * main rng sequence is byte-identical with and without the guard. */
+        uint64_t saved_rs = rs_;
+        rs_ ^= 0xD1B54A32D192ED03ULL * (uint64_t)(thermo_round_ + 1);
+        bool base_ok = true;
+        for (int i = 0; i < count; i++) {
+            uint64_t m = dom_[cells[i]];
+            if (!m) { base_ok = false; break; }
+            int tile = pc64(m) == 1 ? __builtin_ctzll(m) : weighted_pick_at(m, cells[i]);
+            dom_[cells[i]] = (uint64_t)1 << tile;
+            if (!propagate_from(cells[i])) { base_ok = false; break; }
+        }
+        QualityMetrics base = base_ok ? quality_measure(false) : before;
+        rs_ = saved_rs;
+        /* ties go to the sidecar, so learning keeps receiving signal */
+        if (!base_ok || quality_objective(after) >= quality_objective(base)) {
+            memcpy(dom_, thermo_try_, sizeof(uint64_t) * cells_n);
+        } else {
+            after = base;
+            accepted = 0;
+            rejected = count;
+            thermo_displaced_ += count;
+        }
+    }
     thermo_round_++;
     thermo_proposals_ += count;
     thermo_accepts_ += accepted;
@@ -4837,7 +4894,6 @@ static bool thermo_apply_patch(const char *s) {
     thermo_contradictions_ += contradictions;
     g_decided = 0;
     for (size_t i = 0; i < cells_n; i++) if (pc64(dom_[i]) == 1) g_decided++;
-    QualityMetrics after = quality_measure(false);
     quality_record(after);
     return thermo_send_feedback(cells, tiles, count, accepted, rejected,
                                 contradictions, before, after);
@@ -5066,11 +5122,13 @@ static bool save_report(const char *path) {
             g_thermo ? "true" : "false");
     thermo_json_string(f, thermo_sampler_);
     fprintf(f, ",\"round\":%ld,\"observations\":%ld,\"proposals\":%ld,"
-               "\"accepted\":%ld,\"rejected\":%ld,\"contradictions\":%ld,"
+               "\"accepted\":%ld,\"rejected\":%ld,\"displaced\":%ld,"
+               "\"contradictions\":%ld,"
                "\"beta\":%.9g,\"confidence\":%.9g},"
                "\"studio\":{\"pins\":%d},\"macro\":{\"name\":",
             thermo_round_, thermo_observations_, thermo_proposals_,
-            thermo_accepts_, thermo_rejects_, thermo_contradictions_,
+            thermo_accepts_, thermo_rejects_, thermo_displaced_,
+            thermo_contradictions_,
             thermo_beta_, thermo_confidence_, studio_pin_count_);
     thermo_json_string(f, macro_name());
     fprintf(f, ",\"guided_cells\":%d},\"evolution\":{\"candidates\":%d,"
@@ -5118,9 +5176,9 @@ static void render_observatory(void) {
              g_thermo ? "thermo" : "classic", thermo_sampler_,
              g_thermo_learn ? "on" : "off", thermo_beta_, thermo_confidence_);
     fb_puts(line);
-    snprintf(line, sizeof line, "round %ld  observations %ld  proposals %ld  accepted %ld  rejected %ld  contradictions %ld\n",
+    snprintf(line, sizeof line, "round %ld  observations %ld  proposals %ld  accepted %ld  rejected %ld  displaced %ld  contradictions %ld\n",
              thermo_round_, thermo_observations_, thermo_proposals_, thermo_accepts_,
-             thermo_rejects_, thermo_contradictions_);
+             thermo_rejects_, thermo_displaced_, thermo_contradictions_);
     fb_puts(line);
     snprintf(line, sizeof line, "macro %-16s guided %d  hotspot (%d,%d) score %.3f reason %s\n\n",
              macro_name(), macro_guided_cells(), hotspot.x, hotspot.y,

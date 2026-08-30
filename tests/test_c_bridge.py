@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import tempfile
@@ -47,6 +48,30 @@ class CBridgeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("OK mode=circuit 6x4", result.stdout)
         self.assertIn("tries=2 steps=24", result.stdout)
+
+    def test_quality_guard_displaces_weak_proposals_reproducibly(self):
+        """A patch that loses to the classic pick is rolled back and counted.
+
+        The guard runs an extra weighted_pick_at draw per round; it must do so
+        on a derived rng stream, so two identical runs stay byte-identical.
+        """
+        reports = []
+        with tempfile.TemporaryDirectory() as tmp:
+            for run in range(2):
+                report = Path(tmp) / ("report-%d.json" % run)
+                result = self.run_wfc(FAKE_WORKER, "--report", os.fspath(report))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                reports.append(json.loads(report.read_text(encoding="utf-8")))
+
+        thermo = reports[0]["thermo"]
+        self.assertGreater(thermo["proposals"], 0)
+        self.assertGreater(thermo["displaced"], 0,
+                           "guard never rejected a losing proposal")
+        self.assertLessEqual(thermo["displaced"], thermo["rejected"])
+        self.assertEqual(thermo["accepted"] + thermo["rejected"],
+                         thermo["proposals"])
+        self.assertEqual(reports[0]["quality"], reports[1]["quality"])
+        self.assertEqual(reports[0]["thermo"], reports[1]["thermo"])
 
     def test_real_worker_persists_and_no_learn_is_ephemeral(self):
         with tempfile.TemporaryDirectory() as profile_dir:

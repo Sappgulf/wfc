@@ -161,7 +161,20 @@ The sidecar is a long-lived JSONL worker: C sends `init`, bounded `sample`
 rounds, and measured `feedback`; the worker returns `ready`, `stats`,
 incremental `proposal` patches, and `learn` updates. C transactionally applies
 each patch through the authoritative propagator and rolls it back on a
-contradiction. Each feedback frame carries the complete mode-aware quality
+contradiction.
+
+A legal patch still has to earn its place. Each round C keeps a **counterfactual
+guard**: after the proposal propagates cleanly it re-runs the same cells with
+the classic weighted heuristic and scores both states on the mode's quality
+profile. The sidecar's assignment survives only if it ties or wins; otherwise
+the classic result is kept and the round is reported as `displaced` (visible in
+the observatory and in `--report`). Ties go to the sidecar so the learner keeps
+receiving signal, and the baseline draw runs on a derived rng stream so the run
+stays bit-reproducible. Without the guard, legal-but-bland proposals displaced
+better classic picks and `--solver thermo` finished *below* `--solver classic`
+on most network worlds.
+
+Each feedback frame carries the complete mode-aware quality
 vector, a weighted metric delta, and the active per-tile quality prior; the
 learner records bounded metric and objective history in addition to tile,
 compatible-pair, and boundary-context preferences. Everything is bounded,
