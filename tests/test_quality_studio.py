@@ -175,6 +175,23 @@ class QualityStudioTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2, bad)
             self.assertIn("--density", result.stderr)
 
+    def test_coarse_seeded_worlds_solve_at_many_sizes(self):
+        """The value-noise lattice must divide the world at every size.
+
+        When it did not, the toroidal wrap landed mid-lattice-cell and the
+        seam jumped several bands at once; the +/-2 domain windows stopped
+        overlapping there and the grid became unsolvable — but only at some
+        sizes, which the fixed-size sweep never hit.
+        """
+        coarse = ("galaxy", "geode", "stained", "solar", "storm", "glacier", "koi")
+        for mode in coarse:
+            for w, h in ((6, 5), (12, 8), (19, 11), (40, 20), (60, 30), (97, 41)):
+                result = self.run_wfc("--mode", mode, "--seed", "11",
+                                      "--w", str(w), "--h", str(h), "--once")
+                self.assertEqual(result.returncode, 0,
+                                 "%s %dx%d: %s" % (mode, w, h, result.stderr))
+                self.assertNotIn("no solution", result.stderr)
+
     def test_help_lists_every_registered_mode(self):
         """--help renders the mode list from MODES[], so it cannot go stale."""
         modes = self.run_wfc("--list-modes").stdout.split()

@@ -106,45 +106,46 @@ typedef struct {
     bool band_ramp;       /* seed domains along a vertical band gradient */
     bool ramp_flip;       /* ...running bottom-to-top instead */
     bool network;         /* macro-guided connector world the thermo solver learns */
+    bool coarse;          /* seed bands from 2D value noise, not just the ramp */
     unsigned char group;
     unsigned tick_ms;     /* idle-animation clock bucket; 0 = static */
 } ModeSpec;
 
-/*             name        blurb                                             build            sc     tor    sr     ramp   flip   net    group         tick */
+/*             name        blurb                                             build            sc     tor    sr     ramp   flip   net    crse   group         tick */
 static const ModeSpec MODESPEC[] = {
-    {"circuit",  "rainbow circuit boards, signals racing traces",   build_circuit,  false, true,  false, false, false, false, MG_CONNECTOR, 140},
-    {"terrain",  "hillshaded biomes + carved rivers + day cycle",   build_terrain,  true,  true,  true,  false, false, false, MG_FIELD,     260},
-    {"truchet",  "woven arcs with a travelling light pulse",        build_truchet,  false, false, false, false, false, false, MG_CONNECTOR, 500},
-    {"fire",     "living flames with rising embers",                build_fire,     true,  false, true,  true,  false, false, MG_FIELD,      90},
-    {"waves",    "rolling ocean, crest lines, moonpath",            build_waves,    true,  true,  true,  false, false, false, MG_FIELD,     160},
-    {"dungeon",  "torch-lit catacombs with breathing warmth",       build_dungeon,  false, true,  false, false, false, false, MG_CARVE,     220},
-    {"maze",     "labyrinth with wall pulses",                      build_maze,     false, true,  false, false, false, false, MG_CARVE,     360},
-    {"galaxy",   "nebulae with shooting stars",                     build_galaxy,   true,  true,  true,  false, false, false, MG_FIELD,     100},
-    {"city",     "night skylines with beacons + rain",              build_city,     true,  false, true,  true,  false, false, MG_FIELD,     400},
-    {"aurora",   "drifting green curtains over stars",              build_aurora,   true,  false, true,  true,  true, false,  MG_FIELD,     150},
-    {"matrix",   "digital rain with white-hot glyph heads",         build_matrix,   true,  true,  true,  false, false, false, MG_FIELD,     140},
-    {"pipes",    "water pressure networks, pulses racing runs",     build_pipes,    false, true,  false, false, false, false, MG_CONNECTOR, 180},
-    {"mondrian", "painted plazas split by charcoal rules",          build_mondrian, true,  true,  true,  false, false, false, MG_FIELD,     400},
-    {"koi",      "pond bands, koi gliding between lily pads",       build_koi,      true,  true,  true,  false, false, false, MG_FIELD,     250},
-    {"lava",     "crusting basalt over a molten breath",            build_lava,     true,  false, true,  true,  true, false,  MG_FIELD,     130},
-    {"sakura",   "spring night, blossom petals drifting down",      build_sakura,   true,  false, true,  true,  false, false, MG_FIELD,     120},
-    {"geode",    "crystal cavern facets with wandering glints",     build_geode,    true,  true,  true,  false, false, false, MG_FIELD,     160},
-    {"lantern",  "festival sky, lanterns rising past the stars",    build_lantern,  true,  false, true,  true,  true, false,  MG_FIELD,     220},
-    {"dunes",    "heat shimmer under a fixed blazing sun",          build_dunes,    true,  false, true,  true,  false, false, MG_FIELD,     200},
-    {"reef",     "caustic water, coral, bubbles, a fish school",    build_reef,     true,  false, true,  true,  false, false, MG_FIELD,     160},
-    {"stained",  "jewel-glass panes, lead lines, roaming light",    build_stained,  true,  true,  true,  false, false, false, MG_FIELD,     300},
-    {"streets",  "arterial grid, lanes, signals, intersections",    build_streets,  false, false, false, false, false, true,  MG_CONNECTOR, 170},
-    {"neurons",  "branching dendrites with travelling potentials",  build_neurons,  false, true,  false, false, false, true,  MG_CONNECTOR,  95},
-    {"mycelium", "living root networks, knots, drifting spores",    build_mycelium, false, true,  false, false, false, true,  MG_CONNECTOR, 260},
-    {"delta",    "tidal estuary channels, confluences, sandbars",   build_delta,    false, false, false, false, false, true,  MG_CONNECTOR, 145},
-    {"storm",    "thunderhead anvils, rain veils, forked lightning", build_storm,    true,  false, true,  true,  false, false, MG_FIELD,     110},
-    {"glacier",  "blue ice shelves split by crevasses and glints",   build_glacier,  true,  false, true,  true,  true,  false, MG_FIELD,     280},
-    {"bamboo",   "swaying stalks and nodes under a lit canopy",      build_bamboo,   true,  false, true,  true,  false, false, MG_FIELD,     130},
-    {"solar",    "granulated photosphere, sunspots, arcing flares",  build_solar,    true,  true,  true,  false, false, false, MG_FIELD,     100},
-    {"rail",     "marshalling yard, running trains, switch lamps",   build_rail,     false, false, false, false, false, true,  MG_CONNECTOR, 155},
-    {"canyon",   "banded strata, a river cut, dust in the light",    build_canyon,   true,  false, true,  true,  false, false, MG_FIELD,     240},
-    {"vinyl",    "concentric grooves under a sweeping highlight",    build_vinyl,    true,  true,  true,  false, false, false, MG_FIELD,      90},
-    {"loom",     "warp and weft crossing over and under on the web", build_loom,     false, false, false, false, false, false, MG_CONNECTOR, 320},
+    {"circuit",  "rainbow circuit boards, signals racing traces",   build_circuit,  false, true,  false, false, false, false, false, MG_CONNECTOR, 140},
+    {"terrain",  "hillshaded biomes + carved rivers + day cycle",   build_terrain,  true,  true,  true,  false, false, false, false, MG_FIELD,     260},
+    {"truchet",  "woven arcs with a travelling light pulse",        build_truchet,  false, false, false, false, false, false, false, MG_CONNECTOR, 500},
+    {"fire",     "living flames with rising embers",                build_fire,     true,  false, true,  true,  false, false, false, MG_FIELD,      90},
+    {"waves",    "rolling ocean, crest lines, moonpath",            build_waves,    true,  true,  true,  false, false, false, false, MG_FIELD,     160},
+    {"dungeon",  "torch-lit catacombs with breathing warmth",       build_dungeon,  false, true,  false, false, false, false, false, MG_CARVE,     220},
+    {"maze",     "labyrinth with wall pulses",                      build_maze,     false, true,  false, false, false, false, false, MG_CARVE,     360},
+    {"galaxy",   "nebulae with shooting stars",                     build_galaxy,   true,  true,  true,  false, false, false, true,  MG_FIELD,     100},
+    {"city",     "night skylines with beacons + rain",              build_city,     true,  false, true,  true,  false, false, false, MG_FIELD,     400},
+    {"aurora",   "drifting green curtains over stars",              build_aurora,   true,  false, true,  true,  true, false, false,  MG_FIELD,     150},
+    {"matrix",   "digital rain with white-hot glyph heads",         build_matrix,   true,  true,  true,  false, false, false, false, MG_FIELD,     140},
+    {"pipes",    "water pressure networks, pulses racing runs",     build_pipes,    false, true,  false, false, false, false, false, MG_CONNECTOR, 180},
+    {"mondrian", "painted plazas split by charcoal rules",          build_mondrian, true,  true,  true,  false, false, false, false, MG_FIELD,     400},
+    {"koi",      "pond bands, koi gliding between lily pads",       build_koi,      true,  true,  true,  false, false, false, true,  MG_FIELD,     250},
+    {"lava",     "crusting basalt over a molten breath",            build_lava,     true,  false, true,  true,  true, false, false,  MG_FIELD,     130},
+    {"sakura",   "spring night, blossom petals drifting down",      build_sakura,   true,  false, true,  true,  false, false, false, MG_FIELD,     120},
+    {"geode",    "crystal cavern facets with wandering glints",     build_geode,    true,  true,  true,  false, false, false, true,  MG_FIELD,     160},
+    {"lantern",  "festival sky, lanterns rising past the stars",    build_lantern,  true,  false, true,  true,  true, false, false,  MG_FIELD,     220},
+    {"dunes",    "heat shimmer under a fixed blazing sun",          build_dunes,    true,  false, true,  true,  false, false, false, MG_FIELD,     200},
+    {"reef",     "caustic water, coral, bubbles, a fish school",    build_reef,     true,  false, true,  true,  false, false, false, MG_FIELD,     160},
+    {"stained",  "jewel-glass panes, lead lines, roaming light",    build_stained,  true,  true,  true,  false, false, false, true,  MG_FIELD,     300},
+    {"streets",  "arterial grid, lanes, signals, intersections",    build_streets,  false, false, false, false, false, true, false,  MG_CONNECTOR, 170},
+    {"neurons",  "branching dendrites with travelling potentials",  build_neurons,  false, true,  false, false, false, true, false,  MG_CONNECTOR,  95},
+    {"mycelium", "living root networks, knots, drifting spores",    build_mycelium, false, true,  false, false, false, true, false,  MG_CONNECTOR, 260},
+    {"delta",    "tidal estuary channels, confluences, sandbars",   build_delta,    false, false, false, false, false, true, false,  MG_CONNECTOR, 145},
+    {"storm",    "thunderhead anvils, rain veils, forked lightning", build_storm,    true,  false, true,  true,  false, false, true,  MG_FIELD,     110},
+    {"glacier",  "blue ice shelves split by crevasses and glints",   build_glacier,  true,  false, true,  true,  true,  false, true,  MG_FIELD,     280},
+    {"bamboo",   "swaying stalks and nodes under a lit canopy",      build_bamboo,   true,  false, true,  true,  false, false, false, MG_FIELD,     130},
+    {"solar",    "granulated photosphere, sunspots, arcing flares",  build_solar,    true,  true,  true,  false, false, false, true,  MG_FIELD,     100},
+    {"rail",     "marshalling yard, running trains, switch lamps",   build_rail,     false, false, false, false, false, true, false,  MG_CONNECTOR, 155},
+    {"canyon",   "banded strata, a river cut, dust in the light",    build_canyon,   true,  false, true,  true,  false, false, false, MG_FIELD,     240},
+    {"vinyl",    "concentric grooves under a sweeping highlight",    build_vinyl,    true,  true,  true,  false, false, false, false, MG_FIELD,      90},
+    {"loom",     "warp and weft crossing over and under on the web", build_loom,     false, false, false, false, false, false, false, MG_CONNECTOR, 320},
 };
 #define NMODES ((int)(sizeof MODESPEC / sizeof *MODESPEC))
 static int g_mode_idx = 0;
@@ -848,6 +849,38 @@ static void grid_soft_reset(void) {
 static bool bounded_connector_mode(void) {
     return !g_torus && mode_spec()->group == MG_CONNECTOR;
 }
+/* Smoothed compatibility only constrains neighbours, so a band field random
+ * walks and every world built on one reads as noise at arm's length. This
+ * seeds the domains from bilinear value noise on a coarse lattice instead:
+ * broad forms come from the prior, detail and every hard constraint still
+ * come from WFC. The lattice wraps so toroidal worlds stay seamless, and the
+ * interpolation keeps neighbouring targets within a band or two of each
+ * other — the +/-2 windows below have to overlap or the grid contradicts. */
+#define FIELD_LATTICE 9
+static double field_noise(int x, int y) {
+    /* The lattice has to divide the world exactly, or the wrap lands mid-cell
+     * and the seam jumps several bands at once — neighbouring +/-2 windows
+     * stop overlapping there and the grid cannot be solved at all. */
+    int lw = W_ / FIELD_LATTICE; if (lw < 2) lw = 2;
+    int lh = H_ / FIELD_LATTICE; if (lh < 2) lh = 2;
+    double u = (double)x / (W_ > 0 ? W_ : 1) * lw;
+    double v = (double)y / (H_ > 0 ? H_ : 1) * lh;
+    int gx = (int)u, gy = (int)v;
+    double fx = u - gx, fy = v - gy;
+    fx = fx * fx * (3.0 - 2.0 * fx);          /* smoothstep: gentle gradients */
+    fy = fy * fy * (3.0 - 2.0 * fy);
+    double corner[2][2];
+    for (int j = 0; j < 2; j++)
+        for (int i = 0; i < 2; i++) {
+            int cx = (gx + i) % lw, cy = (gy + j) % lh;
+            corner[j][i] = (hash3((uint32_t)cx, (uint32_t)cy,
+                                  (uint32_t)(g_seed ^ (g_seed >> 32))) % 1024) / 1023.0;
+        }
+    double a = corner[0][0] + (corner[0][1] - corner[0][0]) * fx;
+    double b = corner[1][0] + (corner[1][1] - corner[1][0]) * fx;
+    return a + (b - a) * fy;
+}
+
 static uint64_t grid_cell_mask(int x, int y) {
     uint64_t full = ((uint64_t)1 << ntiles_) - 1;
     uint64_t m = full;
@@ -859,9 +892,21 @@ static uint64_t grid_cell_mask(int x, int y) {
             if (x == W_ - 1 && tiles_[t].e[1]) m &= ~(1ULL << t);
         }
     }
-    if (mode_spec()->band_ramp) {
-        int tb = (int)(7.0 * (H_ - 1 - y) / (H_ > 1 ? H_ - 1 : 1));
-        if (mode_spec()->ramp_flip) tb = 7 - tb;
+    const ModeSpec *spec = mode_spec();
+    if (spec->band_ramp || spec->coarse) {
+        int tb;
+        if (spec->band_ramp) {
+            tb = (int)(7.0 * (H_ - 1 - y) / (H_ > 1 ? H_ - 1 : 1));
+            if (spec->ramp_flip) tb = 7 - tb;
+            /* a coarse world with a ramp keeps the ramp and lets the field
+             * bend it, so dunes still crest and strata still lie flat-ish */
+            if (spec->coarse)
+                tb = (int)((2.0 * tb + 7.0 * field_noise(x, y)) / 3.0 + 0.5);
+        } else {
+            tb = (int)(field_noise(x, y) * 7.999);
+        }
+        if (tb < 0) tb = 0;
+        if (tb > 7) tb = 7;
         int lo = tb - 2 < 0 ? 0 : tb - 2, hi = tb + 2 > 7 ? 7 : tb + 2;
         for (int t = 0; t < ntiles_; t++) {
             int b = tiles_[t].e[0] >> 4;

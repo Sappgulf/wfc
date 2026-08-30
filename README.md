@@ -121,6 +121,13 @@ candidate, scores the complete quality vector, and restores the winning map.
 The equivalent headless command is `--evolve 4`; it prints ranked scores and
 leaves the winner active for `--save` or `--report`.
 
+Seven field worlds — galaxy, geode, stained, solar, storm, glacier and koi —
+seed their domains from bilinear value noise on a coarse lattice rather than
+letting a smoothed band field random-walk. Broad forms (nebula clouds, crystal
+veins, whole panes of glass) come from that prior; detail and every hard
+constraint still come from WFC. The lattice divides the world exactly so
+toroidal wraps stay seamless.
+
 The network worlds have deterministic macro guidance before local WFC detail:
 streets uses an arterial grid, neurons use soma/branch rays, mycelium uses
 spore tendrils, delta uses a source-to-mouth channel field, and rail lays
