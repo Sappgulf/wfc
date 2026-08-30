@@ -6213,7 +6213,13 @@ int main(int argc, char **argv) {
             const char *m = NEXTV();
             int found = -1;
             for (int k = 0; k < NMODES; k++) if (!strcmp(m, MODES[k])) found = k;
-            if (found < 0) { fprintf(stderr, "mode must be circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium|delta\n"); return 2; }
+            if (found < 0) {
+                fputs("mode must be one of:", stderr);
+                for (int k = 0; k < NMODES; k++)
+                    fprintf(stderr, "%s%s", k % 6 ? " " : "\n  ", MODES[k]);
+                fputc('\n', stderr);
+                return 2;
+            }
             setup_mode(found);
         }
         else if (!strcmp(argv[i], "--w")) {
