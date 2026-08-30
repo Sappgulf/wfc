@@ -188,6 +188,49 @@ class QualityStudioTests(unittest.TestCase):
                              "%s sounds like %s" % (name, seen.get((family, key))))
             seen[(family, key)] = name
 
+    def _report(self, tmp, *extra):
+        report = Path(tmp) / "r.json"
+        result = self.run_wfc("--mode", "streets", "--seed", "31337",
+                              "--w", "20", "--h", "12", "--once",
+                              "--thermo-profile", os.fspath(tmp),
+                              "--report", os.fspath(report), *extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(report.read_text(encoding="utf-8"))["quality"]["total"]
+
+    def test_learned_profile_steers_the_classic_solver(self):
+        """--learned applies the sidecar's tile preferences without it running.
+
+        The worker learned which tiles pay off and wrote them to a profile,
+        but only the worker ever read them back: --solver classic left every
+        lesson sitting unused on disk.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = self._report(tmp)
+            self.assertAlmostEqual(plain, self._report(tmp, "--learned"), places=9,
+                                   msg="--learned with no profile must change nothing")
+
+            # a lopsided but well-formed profile for the 14-tile connector set
+            bias = [2.0] + [-2.0] * 13
+            (Path(tmp) / "streets-deadbeef.json").write_text(
+                json.dumps({"mode": "streets", "tile_bias": bias}), encoding="utf-8")
+            steered = self._report(tmp, "--learned")
+            self.assertNotAlmostEqual(plain, steered, places=6,
+                                      msg="a profile must reach the classic pick")
+
+    def test_a_profile_that_does_not_fit_the_tileset_is_ignored(self):
+        """Length is the guard: the fingerprint lives on the Python side."""
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = self._report(tmp)
+            for bad in ({"tile_bias": [0.5] * 3},                    # too short
+                        {"tile_bias": [0.5] * 40},                   # too long
+                        {"tile_bias": [99.0] * 14},                  # out of range
+                        {"tile_bias": "not-an-array"},
+                        {}):
+                (Path(tmp) / "streets-deadbeef.json").write_text(
+                    json.dumps(bad), encoding="utf-8")
+                self.assertAlmostEqual(plain, self._report(tmp, "--learned"), places=9,
+                                       msg="malformed profile must be ignored: %s" % bad)
+
     def test_density_flag_is_range_checked(self):
         self.assertEqual(self.run_wfc("--density", "50", "--mode", "streets",
                                       "--w", "8", "--h", "6", "--once").returncode, 0)

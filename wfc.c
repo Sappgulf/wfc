@@ -28,6 +28,7 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <dirent.h>
 #include <math.h>
 #include <poll.h>
 #include <signal.h>
@@ -1178,18 +1179,106 @@ static double quality_tile_prior(int tile) {
     return quality_signed_clamp((1.0 - fabs(degree - ideal) / 3.5) * 2.0 - 1.0);
 }
 
+/* ---------------- learned tile preferences in the classic solver ----------
+ * The thermo sidecar learns which tiles pay off in a world and writes them to
+ * a profile, but only the sidecar ever consulted them: run --solver classic
+ * and every lesson sat unused on disk. --learned reads the profile the worker
+ * wrote and applies its tile preferences to the classic weighted pick, in the
+ * same log-space the worker scores in — so a world you have been solving gets
+ * better even with no Python running.
+ *
+ * The profile is keyed by a fingerprint the worker computes, so rather than
+ * reimplement that hash we take the first profile for this mode and validate
+ * it by length: a tileset that has changed shape cannot be applied by
+ * accident. */
+static const char *json_str(const char *s, const char *key);
+static char g_thermo_profile[512];
+
+static bool g_learned = false;
+static double learned_bias_[MAXT];
+static bool learned_ready_ = false;
+static int learned_for_mode_ = -1;
+
+static bool learned_parse_array(const char *json, const char *key,
+                                double *out, int want) {
+    const char *p = json_str(json, key);
+    if (!p || *p != '[') return false;
+    p++;
+    int n = 0;
+    for (;;) {
+        while (*p == ' ' || *p == ',' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+        if (*p == ']') break;
+        if (n >= want) return false;          /* longer than our tileset */
+        char *end = NULL;
+        double v = strtod(p, &end);
+        if (end == p || !isfinite(v)) return false;
+        if (v < -8.0 || v > 8.0) return false; /* the worker clamps to 2.5 */
+        out[n++] = v;
+        p = end;
+    }
+    return n == want;
+}
+
+static void learned_load(void) {
+    learned_ready_ = false;
+    learned_for_mode_ = g_mode_idx;
+    for (int i = 0; i < MAXT; i++) learned_bias_[i] = 0.0;
+    if (!g_learned || ntiles_ <= 0) return;
+    char dir[512];
+    if (g_thermo_profile[0]) snprintf(dir, sizeof dir, "%s", g_thermo_profile);
+    else {
+        const char *home = getenv("HOME");
+        snprintf(dir, sizeof dir, "%s/.wfc-thermo", home ? home : "/tmp");
+    }
+    DIR *d = opendir(dir);
+    if (!d) return;
+    char prefix[80];
+    snprintf(prefix, sizeof prefix, "%s-", mode_name());
+    char path[1024];
+    path[0] = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        size_t len = strlen(e->d_name);
+        if (strncmp(e->d_name, prefix, strlen(prefix)) != 0) continue;
+        if (len < 6 || strcmp(e->d_name + len - 5, ".json") != 0) continue;
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        break;
+    }
+    closedir(d);
+    if (!path[0]) return;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    static char buf[1 << 18];
+    size_t got = fread(buf, 1, sizeof buf - 1, f);
+    bool truncated = !feof(f);
+    fclose(f);
+    if (truncated) return;                    /* refuse to read half a profile */
+    buf[got] = 0;
+    if (learned_parse_array(buf, "tile_bias", learned_bias_, ntiles_))
+        learned_ready_ = true;
+    else
+        for (int i = 0; i < MAXT; i++) learned_bias_[i] = 0.0;
+}
+
+static double learned_weight(int tile) {
+    if (!g_learned) return 1.0;
+    if (learned_for_mode_ != g_mode_idx) learned_load();
+    if (!learned_ready_ || tile < 0 || tile >= ntiles_) return 1.0;
+    return exp(learned_bias_[tile]);          /* the worker's own log space */
+}
+
 static int weighted_pick_at(uint64_t m, int cell) {
     double tot = 0, acc = 0;
     for (uint64_t mm = m; mm; mm &= mm - 1) {
         int tile = __builtin_ctzll(mm);
-        double weight = tiles_[tile].weight;
+        double weight = tiles_[tile].weight * learned_weight(tile);
         if (cell >= 0) weight *= exp(0.52 * macro_tile_bonus(cell, tile));
         tot += weight;
     }
     double r = rndf() * tot;
     for (uint64_t mm = m; mm; mm &= mm - 1) {
         int tile = __builtin_ctzll(mm);
-        double weight = tiles_[tile].weight;
+        double weight = tiles_[tile].weight * learned_weight(tile);
         if (cell >= 0) weight *= exp(0.52 * macro_tile_bonus(cell, tile));
         acc += weight;
         if (r <= acc) return tile;
@@ -7144,6 +7233,7 @@ int main(int argc, char **argv) {
             snprintf(g_thermo_profile, sizeof g_thermo_profile, "%s", profile);
         }
         else if (!strcmp(argv[i], "--reset-learning")) g_thermo_reset_learning = true;
+        else if (!strcmp(argv[i], "--learned")) g_learned = true;
         else if (!strcmp(argv[i], "--modes")) {
             static const char *FAMILY[] = {"field", "connector", "carve"};
             static const char *NOTE[12] = {"A", "A#", "B", "C", "C#", "D",
@@ -7274,6 +7364,7 @@ int main(int argc, char **argv) {
                    "  --no-learn                       disable persistent thermo preferences\n"
                    "  --thermo-profile DIR             store thermo profiles in DIR\n"
                    "  --reset-learning                 clear the active thermo profile\n"
+                   "  --learned                        let the classic solver use the learned profile\n"
                    "                                   THRML optional; bounded proposals always work\n"
                    "  --gif FILE.gif                   record collapse animation\n"
                    "  --cycle                          auto-cycle modes forever (screensaver)\n"
