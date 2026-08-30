@@ -53,6 +53,7 @@
 static const char *MODES[NMODES] = {"circuit", "terrain", "truchet", "fire", "waves", "dungeon", "maze", "galaxy", "city", "aurora", "matrix", "pipes", "mondrian", "koi", "lava", "sakura", "geode", "lantern", "dunes", "reef", "stained", "streets", "neurons", "mycelium", "delta"};
 static int g_mode_idx = 0;
 static int g_user_w = 999, g_user_h = 999;
+static bool g_fullscreen = false;
 static uint64_t g_seed = 0;
 static bool g_seed_set = false;
 static long g_speed = 1600;
@@ -2003,6 +2004,7 @@ static void render_help(void) {
         "  T       thermo solver        R     reset thermo learning\n",
         "  l       quality observatory   P     pin/unpin hovered cell\n",
         "  Q       quality heatmap      E     evolve/rank seed variants\n",
+        "  F       fit fullscreen       f     drift camera\n",
         "  wasd    hero walk\n",
         "  n       zen: worlds morph    q     quit",
         "",
@@ -4418,22 +4420,35 @@ static void raw_on(void) {
     if (tcsetattr(STDIN_FILENO, TCSANOW, &t) == 0) g_raw_on = true;
 }
 
-static void term_fit(void) {
+static void term_fit_for(int term_cols, int term_rows) {
     int cw = strcmp(MODES[g_mode_idx], "terrain") ? 4 : 2;
     int ch = strcmp(MODES[g_mode_idx], "terrain") ? 2 : 1;
     int mw = 140, mh = 70; /* auto caps */
-    struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 8 && ws.ws_row > 6) {
-        if (ws.ws_col / cw < mw) mw = ws.ws_col / cw;
-        if ((ws.ws_row - 1) / ch < mh) mh = (ws.ws_row - 1) / ch;
+    if (term_cols > 8 && term_rows > 6) {
+        if (term_cols / cw < mw) mw = term_cols / cw;
+        if ((term_rows - 1) / ch < mh) mh = (term_rows - 1) / ch;
     }
-    W_ = g_user_w < mw ? g_user_w : mw;
-    H_ = g_user_h < mh ? g_user_h : mh;
+    if (g_fullscreen && g_is_tty) {
+        W_ = mw;
+        H_ = mh;
+    } else {
+        W_ = g_user_w < mw ? g_user_w : mw;
+        H_ = g_user_h < mh ? g_user_h : mh;
+    }
     if (g_inf) { g_fit_w = W_; g_fit_h = H_; }
     if (g_quad && g_is_tty) { W_ /= 2; H_ /= 2; }
     else if (g_twin && g_is_tty) W_ /= 2; /* two worlds share the row */
     if (W_ < 4) W_ = 4;
     if (H_ < 4) H_ = 4;
+}
+static void term_fit(void) {
+    struct winsize ws = {0};
+    int term_cols = 0, term_rows = 0;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
+        term_cols = ws.ws_col;
+        term_rows = ws.ws_row;
+    }
+    term_fit_for(term_cols, term_rows);
 }
 static void apply_size(void) {
     int ow = W_, oh = H_;
@@ -4998,24 +5013,26 @@ static void render_status(int vh, int ch) {
     if (pct > 100) pct = 100;
     char core[160], line[256];
     const char *mode = MODES[g_mode_idx];
+    const char *fit = g_fullscreen ? " FILL" : "";
     if (g_thermo) {
         const char *engine = thermo_ready_ ? thermo_sampler_ :
                              thermo_inflight_ ? "boot" :
                              pct == 100 ? "done" : "idle";
         const char *learning = g_thermo_learn ? "learn" : "ephem";
         if (g_quality_live >= 0.0) {
-            snprintf(core, sizeof core, "%s %3d%% | T/%s q%.2f o%ld/%ld P%d %s",
+            snprintf(core, sizeof core, "%s %3d%% | T/%s q%.2f o%ld/%ld P%d %s [%dx%d]%s",
                      mode, pct, engine, g_quality_live, thermo_observations_,
-                     thermo_round_, studio_pin_count_, learning);
+                     thermo_round_, studio_pin_count_, learning, W_, H_, fit);
         } else {
-            snprintf(core, sizeof core, "%s %3d%% | T/%s P%d %s",
-                     mode, pct, engine, studio_pin_count_, learning);
+            snprintf(core, sizeof core, "%s %3d%% | T/%s P%d %s [%dx%d]%s",
+                     mode, pct, engine, studio_pin_count_, learning, W_, H_, fit);
         }
     } else if (g_quality_live >= 0.0) {
-        snprintf(core, sizeof core, "%s %3d%% | classic q%.2f P%d",
-                 mode, pct, g_quality_live, studio_pin_count_);
+        snprintf(core, sizeof core, "%s %3d%% | classic q%.2f P%d [%dx%d]%s",
+                 mode, pct, g_quality_live, studio_pin_count_, W_, H_, fit);
     } else {
-        snprintf(core, sizeof core, "%s %3d%% | classic P%d", mode, pct, studio_pin_count_);
+        snprintf(core, sizeof core, "%s %3d%% | classic P%d [%dx%d]%s",
+                 mode, pct, studio_pin_count_, W_, H_, fit);
     }
     if (now_ms() < g_note_until && g_note[0])
         snprintf(line, sizeof line, "%s | %s", core, g_note);
@@ -5135,7 +5152,8 @@ static void render_observatory(void) {
     }
     fb_puts("\n\n");
     fb_fg((RGB){150, 180, 205});
-    fb_puts("l return   Q heatmap   E evolution   P pin/unpin hover   right-click unpin   h help   q quit\n");
+    fb_puts("l return   Q heatmap   E evolution   F fit fullscreen   P pin/unpin hover\n");
+    fb_puts("right-click unpin   h help   q quit\n");
     fb_puts("report: use --report FILE.json for reproducible quality + thermo + studio data");
     fb_puts("\x1b[0m");
     frame_begin();
@@ -5167,7 +5185,7 @@ static void render_evolution_lab(void) {
                  i == 0 ? "  <- winner" : "");
         fb_puts(line);
     }
-    fb_puts("\nE return   Q heatmap   l observatory   P pin/unpin   q quit");
+    fb_puts("\nE return   Q heatmap   l observatory   F fit fullscreen   P pin/unpin   q quit");
     fb_puts("\x1b[0m");
     frame_begin();
     fwrite(fb_, 1, fblen_, stdout);
@@ -5628,6 +5646,14 @@ static bool evolution_run(int requested) {
     return true;
 }
 
+static void toggle_fullscreen_fit(void) {
+    if (g_thermo) thermo_kill();
+    g_fullscreen = !g_fullscreen;
+    apply_size();
+    full_repaint_ = true;
+    set_note("fullscreen fit %s [%dx%d]", g_fullscreen ? "ON" : "off", W_, H_);
+}
+
 static int pump_keys(bool tty) {
     if (!tty) return 0;
     int req = 0;
@@ -5713,6 +5739,9 @@ static int pump_keys(bool tty) {
                 g_paused = true;
                 if (g_thermo) set_note("evolution: turn thermo off first");
                 else if (evolution_run(4)) g_evolve_view = true;
+            } else if (c == 'F') {
+                toggle_fullscreen_fit();
+                req = 1;
             }
             continue;
         }
@@ -5724,6 +5753,9 @@ static int pump_keys(bool tty) {
             } else if (c == 'Q') {
                 g_heatmap = !g_heatmap;
                 set_note("quality heatmap %s", g_heatmap ? "ON" : "off");
+            } else if (c == 'F') {
+                toggle_fullscreen_fit();
+                req = 1;
             } else if (c == 'q' || c == 3) {
                 g_evolve_view = false;
                 req = req == 1 ? 1 : 2;
@@ -5917,6 +5949,10 @@ static int pump_keys(bool tty) {
 #endif
         }
         else if (c == 'f') { g_pan = !g_pan; set_note("drift %s", g_pan ? "on" : "off"); }
+        else if (c == 'F') {
+            toggle_fullscreen_fit();
+            req = 1;
+        }
         else if (c == 'T') {
             if (g_nworlds > 1 || g_inf) set_note("thermo: single-world only");
             else {
@@ -6212,6 +6248,7 @@ int main(int argc, char **argv) {
             g_seed_set = true;
         }
         else if (!strcmp(argv[i], "--pan")) g_pan = true;
+        else if (!strcmp(argv[i], "--fullscreen")) g_fullscreen = true;
         else if (!strcmp(argv[i], "--theme")) {
             long value;
             const char *v = NEXTV();
@@ -6286,6 +6323,7 @@ int main(int argc, char **argv) {
                    "  --gfx / --no-gfx                 inline-image rendering (iTerm2/WezTerm/kitty)\n"
                    "  --link wfc://mode/seed           replay a shared world\n"
                    "  --pan                            drift the camera after solving\n"
+                   "  --fullscreen                     fill the live terminal viewport (interactive)\n"
                    "  --bench                          performance table across modes\n"
                    "  --evolve N                       rank 2-8 deterministic seed variants\n"
                    "  --twin / --quad                  two or four worlds at once\n"
@@ -6299,7 +6337,7 @@ int main(int argc, char **argv) {
                    "keys: space new | m mode | y theme | c cycle | a audio | h help\n"
                    "      i iso | , . scrub collapse | wasd hero in dungeon\n"
                    "      l observatory | Q heatmap | E evolution | P pin/unpin hover\n"
-                   "      +/- speed p pause g gif s save q quit\n"
+                   "      F fullscreen fit | +/- speed p pause g gif s save q quit\n"
                    "build: cc -O2 -std=c11 -o wfc wfc.c -lz\n");
             return 0;
         }
@@ -6556,7 +6594,12 @@ inf_continue:
         int r = 0;
         for (;;) {
             int req = pump_keys(true);
-            if (g_winch) { g_winch = 0; apply_size(); req = 1; }
+            if (g_winch) {
+                g_winch = 0;
+                if (g_thermo) thermo_kill();
+                apply_size();
+                req = 1;
+            }
             if (req == 2) g_stop = 1;
             if (g_stop) break;
             if (req == 1) break;

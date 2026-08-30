@@ -11,6 +11,18 @@ int main(void) {
     g_seed_set = true;
     rs_ = g_seed ^ 0xD1B54A32D192ED03ULL;
     setup_mode(find_mode("delta"));
+
+    g_is_tty = true;
+    g_user_w = 36;
+    g_user_h = 16;
+    g_fullscreen = false;
+    term_fit_for(202, 58);
+    assert(W_ == 36 && H_ == 16);
+    g_fullscreen = true;
+    term_fit_for(202, 58);
+    assert(W_ == 50 && H_ == 28);
+    g_fullscreen = false;
+
     W_ = 8;
     H_ = 6;
     grid_alloc(W_, H_);

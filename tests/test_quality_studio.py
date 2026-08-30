@@ -68,6 +68,18 @@ class QualityStudioTests(unittest.TestCase):
             self.assertGreater(payload["macro"]["guided_cells"], 0)
             self.assertEqual(payload["evolution"]["candidates"], 0)
 
+    def test_fullscreen_flag_keeps_headless_dimensions_deterministic(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = Path(temp_dir) / "headless-fullscreen.json"
+            result = self.run_wfc(
+                "--fullscreen", "--mode", "delta", "--seed", "7",
+                "--w", "8", "--h", "6", "--once", "--report",
+                os.fspath(report),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(payload["dimensions"], {"w": 8, "h": 6})
+
     def test_evolution_lab_is_reproducible_and_reports_a_winner(self):
         args = ("--mode", "delta", "--seed", "7", "--w", "8", "--h", "6",
                 "--once", "--evolve", "3")
@@ -97,6 +109,7 @@ class QualityStudioTests(unittest.TestCase):
         self.assertIn("Q heatmap", result.stdout)
         self.assertIn("E evolution", result.stdout)
         self.assertIn("--evolve N", result.stdout)
+        self.assertIn("--fullscreen", result.stdout)
 
 
 if __name__ == "__main__":

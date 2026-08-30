@@ -52,6 +52,7 @@ heightfield view, `i` for the isometric relief view of any solved world.
 `n` zen mode · `T` toggle the thermodynamic solver · `R` reset thermo learning ·
 `l` quality observatory · `P` pin/unpin the hovered cell ·
 `Q` quality heatmap · `E` Evolution Lab (rank seed variants) ·
+`F` fit the live terminal viewport ·
 `w a s d` hero crawl
 through solved dungeons (light all the torches) · `h` help · `q` quit
 
@@ -61,7 +62,8 @@ Mouse: left-click seed, right-click carve or unpin, drag paint, hover inspect.
 
 ```
 --mode M     circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium|delta
---w/--h N    grid cells (auto-fit by default)
+--w/--h N    grid cells (auto-fit by default; overridden by --fullscreen)
+--fullscreen fill the live terminal viewport and reflow on resize
 --seed N|w   numeric or word seed
 --speed N    collapse steps/sec
 --infinite   ever-growing world
@@ -111,6 +113,12 @@ The network worlds have deterministic macro guidance before local WFC detail:
 streets uses an arterial grid, neurons use soma/branch rays, mycelium uses
 spore tendrils, and delta uses a source-to-mouth channel field. These are soft
 priors, so hard compatibility and propagation still decide the final map.
+
+Fullscreen layout is available at launch with `--fullscreen`, or interactively
+with `F`. It uses the terminal's current columns and rows, reserves the final
+row for the HUD, and recomputes the grid after `SIGWINCH` resizes. Without it,
+explicit `--w/--h` dimensions remain stable for repeatable compositions; the
+HUD shows the active grid and `FILL` when viewport fitting is enabled.
 
 Headless runs are intentionally bounded: `--twin`, `--quad`, and
 `--infinite` require an interactive terminal. Numeric options are validated
