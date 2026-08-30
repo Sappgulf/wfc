@@ -8,7 +8,9 @@
  *   mondrian: painted plazas split by charcoal rules
  *   koi     : a pond where koi drift between lily pads
  *   lava    : crusting basalt over a breathing molten field
- *   ...plus 9 more world styles
+ *   streets : procedural city streets with signals and crossings
+ *   neurons : branching dendrites with live action potentials
+ *   mycelium: organic root networks and drifting spores
  *
  * Views: r raymarched heightfield, i isometric relief, z all-worlds sheet.
  * Extras: gif/png export, terminal pixel rendering (iTerm/kitty/WezTerm),
@@ -22,6 +24,7 @@
  */
 
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <math.h>
 #include <signal.h>
@@ -32,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
@@ -44,11 +48,12 @@
 #define OPPOSITE(d) (((d) + 2) & 3)
 
 /* ---------------- config ---------------- */
-#define NMODES 21
-static const char *MODES[NMODES] = {"circuit", "terrain", "truchet", "fire", "waves", "dungeon", "maze", "galaxy", "city", "aurora", "matrix", "pipes", "mondrian", "koi", "lava", "sakura", "geode", "lantern", "dunes", "reef", "stained"};
+#define NMODES 24
+static const char *MODES[NMODES] = {"circuit", "terrain", "truchet", "fire", "waves", "dungeon", "maze", "galaxy", "city", "aurora", "matrix", "pipes", "mondrian", "koi", "lava", "sakura", "geode", "lantern", "dunes", "reef", "stained", "streets", "neurons", "mycelium"};
 static int g_mode_idx = 0;
 static int g_user_w = 999, g_user_h = 999;
 static uint64_t g_seed = 0;
+static bool g_seed_set = false;
 static long g_speed = 1600;
 static bool g_once = false;
 static char g_save_path[512] = {0};
@@ -57,10 +62,6 @@ static double g_delay_ms;
 static int g_render_every;
 static int g_decided = 0;
 static bool g_daycycle = false;
-
-
-
-bool multi_done_[4];
 static bool g_twin = false;
 static bool g_quad = false;
 static int g_nworlds = 1;
@@ -117,6 +118,9 @@ static uint32_t anim_epoch(void) {
     if (!strcmp(m, "dunes")) return (uint32_t)(now_ms() / 200);   /* heat shimmer */
     if (!strcmp(m, "reef")) return (uint32_t)(now_ms() / 160);    /* caustics + fish */
     if (!strcmp(m, "stained")) return (uint32_t)(now_ms() / 300); /* light sweep */
+    if (!strcmp(m, "streets")) return (uint32_t)(now_ms() / 170);  /* traffic signals */
+    if (!strcmp(m, "neurons")) return (uint32_t)(now_ms() / 95);   /* action potentials */
+    if (!strcmp(m, "mycelium")) return (uint32_t)(now_ms() / 260); /* spore drift */
     return 0;
 }
 static int g_bulk_idx = -1;
@@ -126,6 +130,9 @@ static volatile sig_atomic_t g_winch = 0;
 
 static int W_, H_;
 #define IDX(x, y) ((y) * W_ + (x))
+
+#define MAX_SPEED 200000L
+#define MAX_EXPORT_PIXELS ((size_t)64 * 1024 * 1024)
 
 /* ---------------- rng ---------------- */
 static uint64_t rs_;
@@ -177,6 +184,34 @@ static void build_pipes(void) {
         if (m[i] & 8) t->e[3] = 1;
         t->weight = t->wbase = w[i];
     }
+}
+/* The three adaptive worlds share exact connector compatibility but use
+ * different priors.  This keeps the hard domain graph identical while making
+ * each visual language statistically distinct for the thermo learner. */
+static void build_connector_world(const double weights[14]) {
+    const int masks[] = {0, 10, 5, 3, 6, 12, 9, 7, 14, 4, 8, 1, 2, 15};
+    for (int i = 0; i < 14; i++) {
+        Tile *t = &tiles_[ntiles_++];
+        memset(t, 0, sizeof *t);
+        for (int d = 0; d < NDIR; d++)
+            t->e[d] = (uint8_t)((masks[i] >> d) & 1);
+        t->weight = t->wbase = weights[i];
+    }
+}
+/* streets: broad avenues, corners, crossings, and occasional dead ends */
+static void build_streets(void) {
+    static const double weights[14] = {32, 18, 18, 9, 9, 9, 9, 5, 5, 1.6, 1.6, 1.2, 1.2, 0.7};
+    build_connector_world(weights);
+}
+/* neurons: branching dendrites with a bright population of junctions */
+static void build_neurons(void) {
+    static const double weights[14] = {4, 12, 12, 10, 10, 10, 10, 8, 8, 1.4, 1.4, 2.2, 2.2, 3.0};
+    build_connector_world(weights);
+}
+/* mycelium: sparse roots, knots, and a few spore-like termini */
+static void build_mycelium(void) {
+    static const double weights[14] = {24, 10, 10, 7, 7, 7, 7, 3.8, 3.8, 2.4, 2.4, 2.0, 2.0, 0.45};
+    build_connector_world(weights);
 }
 /* mondrian: five painted plains + rare black slab; blockers are drawn as
  * thick charcoal lines wherever two bands meet */
@@ -266,7 +301,8 @@ static void apply_bias(void) {
         tiles_[i].lw = log2(tiles_[i].weight);
     }
     if (!strcmp(MODES[g_mode_idx], "circuit") || !strcmp(MODES[g_mode_idx], "truchet") ||
-        !strcmp(MODES[g_mode_idx], "pipes")) {
+        !strcmp(MODES[g_mode_idx], "pipes") || !strcmp(MODES[g_mode_idx], "streets") ||
+        !strcmp(MODES[g_mode_idx], "neurons") || !strcmp(MODES[g_mode_idx], "mycelium")) {
         g_bulk_idx = 0;
         for (int i = 0; i < ntiles_; i++)
             tiles_[i].weight = tiles_[i].wbase *
@@ -499,13 +535,17 @@ static void setup_mode(int idx) {
     else if (!strcmp(m, "dunes")) { build_dunes(); build_compat(true); }
     else if (!strcmp(m, "reef")) { build_reef(); build_compat(true); }
     else if (!strcmp(m, "stained")) { build_stained(); build_compat(true); }
+    else if (!strcmp(m, "streets")) { build_streets(); build_compat(false); }
+    else if (!strcmp(m, "neurons")) { build_neurons(); build_compat(false); }
+    else if (!strcmp(m, "mycelium")) { build_mycelium(); build_compat(false); }
     else { build_circuit(); build_compat(false); }
     g_torus = strcmp(MODES[g_mode_idx], "truchet") != 0;
     /* fire keeps torus off too */
     if (!strcmp(MODES[g_mode_idx], "fire") || !strcmp(MODES[g_mode_idx], "city") ||
         !strcmp(MODES[g_mode_idx], "aurora") || !strcmp(MODES[g_mode_idx], "lava") ||
         !strcmp(MODES[g_mode_idx], "sakura") || !strcmp(MODES[g_mode_idx], "lantern") ||
-        !strcmp(MODES[g_mode_idx], "dunes") || !strcmp(MODES[g_mode_idx], "reef"))
+        !strcmp(MODES[g_mode_idx], "dunes") || !strcmp(MODES[g_mode_idx], "reef") ||
+        !strcmp(MODES[g_mode_idx], "streets"))
         g_torus = false;
     g_smooth = !strcmp(MODES[g_mode_idx], "terrain") ||
                !strcmp(MODES[g_mode_idx], "fire") ||
@@ -554,6 +594,9 @@ static void *slots_dom[MAXW];
 static int *slots_stk[MAXW];
 static uint64_t slots_rs[MAXW];
 static int cur_slot = 0;
+/* Keep one canonical pointer per world.  dom_ and stk_ are aliases for the
+ * currently selected world; they must not be used to rebuild this table when
+ * switching, or a switch away from world 0 would lose its pointer. */
 static void world_sync(void) {
     slots_dom[0] = dom_; slots_stk[0] = stk_; slots_rs[0] = rs_;
     if (g_twin || g_quad) { slots_dom[1] = domB_; slots_stk[1] = stkB_; slots_rs[1] = rsB_; }
@@ -566,8 +609,29 @@ static void world_sync(void) {
 extern void click_bufs_invalidate(void);
 static void hist_clear(void);
 static int hist_stride_ = 1, hist_cnt_ = 0;
+static void free_world_buffers(void) {
+    uint64_t *doms[MAXW] = {dom_, domB_, domC_, domD_};
+    int *stks[MAXW] = {stk_, stkB_, stkC_, stkD_};
+    for (int i = 0; i < MAXW; i++) {
+        bool seen_dom = false, seen_stk = false;
+        for (int j = 0; j < i; j++) {
+            if (doms[j] == doms[i]) seen_dom = true;
+            if (stks[j] == stks[i]) seen_stk = true;
+        }
+        if (doms[i] && !seen_dom) free(doms[i]);
+        if (stks[i] && !seen_stk) free(stks[i]);
+    }
+    dom_ = domB_ = domC_ = domD_ = NULL;
+    stk_ = stkB_ = stkC_ = stkD_ = NULL;
+    for (int i = 0; i < MAXW; i++) {
+        slots_dom[i] = NULL;
+        slots_stk[i] = NULL;
+        slots_rs[i] = 0;
+    }
+}
 static void grid_alloc(int w, int h) {
-    free(dom_); free(stk_); free(river_); free(river_rank_);
+    free_world_buffers();
+    free(river_); free(river_rank_);
     free(comp_); free(comp_col_);
     dom_ = malloc(sizeof(uint64_t) * (size_t)w * h);
     stk_ = malloc(sizeof(int) * (size_t)w * h * MAXT);
@@ -582,18 +646,28 @@ static void grid_alloc(int w, int h) {
     stkC_ = malloc(sizeof(int) * (size_t)w * h * MAXT);
     domD_ = malloc(sizeof(uint64_t) * (size_t)w * h);
     stkD_ = malloc(sizeof(int) * (size_t)w * h * MAXT);
-    if (!domB_ || !stkB_) { perror("malloc"); exit(1); }
-    if (!dom_ || !stk_ || !river_ || !river_rank_ || !comp_ || !comp_col_) { perror("malloc"); exit(1); }
+    if (!dom_ || !stk_ || !river_ || !river_rank_ || !comp_ || !comp_col_ ||
+        !domB_ || !stkB_ || !domC_ || !stkC_ || !domD_ || !stkD_) {
+        perror("malloc");
+        free_world_buffers();
+        free(river_); free(river_rank_); free(comp_); free(comp_col_);
+        river_ = NULL; river_rank_ = NULL; comp_ = NULL; comp_col_ = NULL;
+        exit(1);
+    }
+    rsB_ = g_seed ^ 0xA24BAED4963EE407ULL;
+    rsC_ = g_seed ^ 0x9FB21C651E98DF25ULL;
+    rsD_ = g_seed ^ 0xC13FA9A902A6328FULL;
     cur_slot = 0;
     world_sync();
     click_bufs_invalidate();
 }
 
 static void load_world(int w) {
+    if (w < 0 || w >= MAXW) return;
     if ((w == 1 && !g_twin && !g_quad) || (w >= 2 && !g_quad)) return;
     if (w == cur_slot) return;
-    world_sync();
     if (!slots_dom[w]) return;
+    slots_rs[cur_slot] = rs_;
     cur_slot = w;
     dom_ = slots_dom[w]; stk_ = slots_stk[w]; rs_ = slots_rs[w];
 }
@@ -601,6 +675,7 @@ static int pc64(uint64_t x);
 static bool propagate_from(int start);
 /* expand the canvas by unlocking a fresh ring around a finished world */
 static bool world_grow(void) {
+    if (g_nworlds != 1) return false;
     if (getenv("WFC_DEBUG")) { FILE *df=fopen("/tmp/wfc_dbg.log","a"); if(df){fprintf(df,"[grow at %dx%d ok=%d]\n",W_,H_,1); fclose(df);} }
     if (W_ > 300 || H_ > 180) return false;
     int gw = W_ + 10, gh = H_ + 7;
@@ -609,12 +684,16 @@ static bool world_grow(void) {
     uint8_t *nriv = calloc((size_t)gw * gh, 1);
     int *nrr = malloc(sizeof(int) * (size_t)gw * gh);
     if (!nd || !ns || !nriv || !nrr) { free(nd); free(ns); free(nriv); free(nrr); return false; }
+    int *nc = malloc(sizeof(int) * (size_t)gw * gh);
+    RGB *ncc = malloc(sizeof(RGB) * (size_t)gw * gh);
+    if (!nc || !ncc) {
+        free(nc); free(ncc); free(nd); free(ns); free(nriv); free(nrr);
+        return false;
+    }
     uint64_t full = ((uint64_t)1 << ntiles_) - 1;
     for (int y = 0; y < gh; y++)
         for (int x = 0; x < gw; x++) { nd[(size_t)y * gw + x] = full; nrr[(size_t)y * gw + x] = -1; }
     int ox = (gw - W_) / 2, oy = (gh - H_) / 2;
-    g_inf_ax += ox;
-    g_inf_ay += oy;
     for (int y = 0; y < H_; y++)
         for (int x = 0; x < W_; x++) {
             uint64_t v = dom_[IDX(x, y)];
@@ -624,25 +703,17 @@ static bool world_grow(void) {
                 nrr[(size_t)(y + oy) * gw + (x + ox)] = river_rank_[IDX(x, y)];
         }
     free(dom_); free(stk_); free(river_); free(river_rank_);
-    { /* comp_/comp_col_ were sized to the old canvas; resize before any writer */
-        int *nc = malloc(sizeof(int) * (size_t)gw * gh);
-        RGB *ncc = malloc(sizeof(RGB) * (size_t)gw * gh);
-        if (!nc || !ncc) { free(nc); free(ncc); free(nd); free(ns); free(nriv); free(nrr); return false; }
-        free(comp_); free(comp_col_);
-        comp_ = nc; comp_col_ = ncc;
-    }
+    free(comp_); free(comp_col_);
+    comp_ = nc; comp_col_ = ncc;
     dom_ = nd; stk_ = ns; river_ = nriv; river_rank_ = nrr;
     int old_w = W_, old_h = H_;
     W_ = gw; H_ = gh;
+    g_inf_ax += ox;
+    g_inf_ay += oy;
     full_repaint_ = true;
     hist_clear();
     click_bufs_invalidate(); /* undo snapshots are sized to the old canvas */
     n_river_ = 0;
-    for (int i2 = 0; i2 < MAXW; i2++) { /* fresh solve state for all worlds */
-        extern bool multi_done_[];
-        (void)i2;
-    }
-    multi_done_[0] = multi_done_[1] = multi_done_[2] = multi_done_[3] = false;
     world_sync();
     /* pre-constrain the new ring from the solved bedrock border so the
      * solver doesn't immediately contradict at the seam */
@@ -721,6 +792,12 @@ static void grid_reset(void) {
 static void label_components(void) {
     n_comp_ = 0;
     for (int i = 0; i < W_ * H_; i++) comp_[i] = -1;
+    for (int i = 0; i < W_ * H_; i++) {
+        if (pc64(dom_[i]) != 1) {
+            g_comp_ready = false;
+            return;
+        }
+    }
     for (int s = 0; s < W_ * H_; s++) {
         if (comp_[s] >= 0) continue;
         int qh = 0, qt = 0;
@@ -880,6 +957,129 @@ static int wfc_step(void) {
     return propagate_from(best) ? 0 : -1;
 }
 
+/* ---------------- deterministic quality feedback ---------------- */
+typedef struct {
+    double total;
+    double validity;
+    double coverage;
+    double diversity;
+    double smoothness;
+    double stability;
+    double topology;
+} QualityMetrics;
+
+static double quality_clamp(double v) {
+    if (!isfinite(v)) return 0.0;
+    return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v;
+}
+
+static double quality_signed_clamp(double v) {
+    if (!isfinite(v)) return 0.0;
+    return v < -1.0 ? -1.0 : v > 1.0 ? 1.0 : v;
+}
+
+static bool quality_network_mode(void) {
+    const char *m = MODES[g_mode_idx];
+    return !strcmp(m, "circuit") || !strcmp(m, "truchet") ||
+           !strcmp(m, "pipes") || !strcmp(m, "dungeon") ||
+           !strcmp(m, "maze") || !strcmp(m, "streets") ||
+           !strcmp(m, "neurons") || !strcmp(m, "mycelium");
+}
+
+static QualityMetrics quality_measure(bool final_map) {
+    QualityMetrics q = {0};
+    if (W_ <= 0 || H_ <= 0 || ntiles_ <= 0) return q;
+    int cells = W_ * H_;
+    int hist[MAXT] = {0};
+    int decided = 0, empty = 0, active = 0;
+    double degree_sum = 0.0;
+    for (int i = 0; i < cells; i++) {
+        uint64_t mask = dom_[i];
+        int k = pc64(mask);
+        if (!mask) { empty++; continue; }
+        if (k != 1) continue;
+        int tile = __builtin_ctzll(mask);
+        hist[tile]++;
+        decided++;
+        int degree = 0;
+        for (int d = 0; d < NDIR; d++) degree += tiles_[tile].e[d] != 0;
+        if (degree > 0) active++;
+        degree_sum += degree;
+    }
+
+    int edge_known = 0, edge_good = 0;
+    double smooth_sum = 0.0;
+    for (int y = 0; y < H_; y++) {
+        for (int x = 0; x < W_; x++) {
+            int i = IDX(x, y);
+            uint64_t a = dom_[i];
+            if (pc64(a) != 1) continue;
+            int ta = __builtin_ctzll(a);
+            for (int d = 0; d < 2; d++) { /* count each pair once */
+                int nx = x + (d == 1 ? 1 : 0);
+                int ny = y + (d == 0 ? -1 : 0);
+                if (g_torus) {
+                    nx = (nx + W_) % W_;
+                    ny = (ny + H_) % H_;
+                } else if (nx < 0 || ny < 0 || nx >= W_ || ny >= H_) continue;
+                int j = IDX(nx, ny);
+                uint64_t b = dom_[j];
+                if (pc64(b) != 1) continue;
+                int tb = __builtin_ctzll(b);
+                edge_known++;
+                if ((cdir_[d][ta] >> tb) & 1ULL) edge_good++;
+                int ba = tiles_[ta].e[0] >> 4;
+                int bb = tiles_[tb].e[0] >> 4;
+                int diff = abs(ba - bb);
+                smooth_sum += 1.0 - (diff > 7 ? 7 : diff) / 7.0;
+            }
+        }
+    }
+
+    q.coverage = quality_clamp((double)decided / (double)cells);
+    q.validity = empty ? 0.0 : edge_known ? quality_clamp((double)edge_good / edge_known) : 1.0;
+    if (decided > 0) {
+        double entropy = 0.0;
+        for (int t = 0; t < ntiles_; t++) {
+            if (!hist[t]) continue;
+            double p = (double)hist[t] / decided;
+            entropy -= p * log2(p);
+        }
+        double max_entropy = log2(ntiles_ < decided ? ntiles_ : decided);
+        q.diversity = max_entropy > 0.0 ? quality_clamp(entropy / max_entropy) : 1.0;
+    }
+    q.smoothness = edge_known ? quality_clamp(smooth_sum / edge_known) : 1.0;
+    q.stability = empty ? 0.0 : (final_map && decided == cells ? 1.0 : 0.8);
+
+    if (!quality_network_mode()) {
+        q.topology = 1.0;
+    } else if (!active) {
+        q.topology = decided ? 0.15 : 0.0;
+    } else {
+        const char *m = MODES[g_mode_idx];
+        double ideal = !strcmp(m, "streets") ? 2.1 :
+                       !strcmp(m, "neurons") ? 1.8 :
+                       !strcmp(m, "mycelium") ? 1.6 : 1.8;
+        double balance = quality_clamp(1.0 - fabs(degree_sum / active - ideal) / 3.0);
+        double active_ratio = quality_clamp((double)active / (double)(decided ? decided : 1));
+        q.topology = quality_clamp(0.55 * balance + 0.45 * active_ratio);
+    }
+    q.total = quality_clamp(0.30 * q.validity + 0.18 * q.coverage +
+                            0.16 * q.diversity + 0.16 * q.smoothness +
+                            0.20 * q.topology);
+    return q;
+}
+
+static double quality_reward(QualityMetrics before, QualityMetrics after,
+                             int accepted, int rejected) {
+    if (accepted < 0) accepted = 0;
+    if (rejected < 0) rejected = 0;
+    double improvement = after.total - before.total;
+    double acceptance = accepted / (double)(accepted + rejected + 1);
+    double penalty = rejected > 0 ? 0.08 * rejected : 0.0;
+    return quality_signed_clamp(2.0 * improvement + 0.20 * acceptance - penalty);
+}
+
 /* ---------------- colors ---------------- */
 static RGB hsv(double h, double s, double v) {
     h = fmod(h, 360.0); if (h < 0) h += 360;
@@ -984,6 +1184,45 @@ static const RGB STAINPAL[8] = {
     {148, 26, 32}, {188, 92, 18}, {196, 158, 24}, {38, 118, 52},
     {24, 84, 148}, {66, 44, 138}, {148, 40, 112}, {208, 176, 148},
 };
+static const RGB STREETPAL[8] = {
+    {28, 34, 44}, {44, 52, 64}, {66, 74, 84}, {96, 102, 108},
+    {134, 136, 132}, {176, 164, 126}, {228, 196, 112}, {248, 232, 170},
+};
+static const RGB NEURONPAL[8] = {
+    {28, 12, 58}, {54, 18, 94}, {92, 28, 132}, {144, 38, 160},
+    {196, 52, 168}, {232, 86, 180}, {246, 150, 210}, {255, 218, 238},
+};
+static const RGB MYCELIUMPAL[8] = {
+    {12, 34, 28}, {16, 58, 38}, {22, 84, 48}, {34, 112, 56},
+    {54, 140, 66}, {96, 166, 78}, {168, 184, 108}, {224, 214, 150},
+};
+static RGB network_bg(const char *mode) {
+    if (!strcmp(mode, "streets")) return (RGB){7, 10, 16};
+    if (!strcmp(mode, "neurons")) return (RGB){6, 3, 16};
+    return (RGB){4, 16, 12};
+}
+static RGB network_color(const char *mode, int tile, int cx, int cy, double pulse) {
+    int degree = 0;
+    for (int d = 0; d < NDIR; d++) degree += tiles_[tile].e[d] != 0;
+    uint32_t h = hash3((uint32_t)(cx * 17 + tile), (uint32_t)(cy * 29 + degree), 731);
+    if (!strcmp(mode, "streets")) {
+        double signal = 0.80 + 0.20 * sin(now_ms() * 0.0017 + cx * 0.8 + cy * 0.33);
+        RGB c = STREETPAL[degree > 7 ? 7 : degree + (h % 2)];
+        if (h % 37 == 5) c = (RGB){244, 86, 72};
+        return scalec(c, pulse * signal);
+    }
+    if (!strcmp(mode, "neurons")) {
+        int band = (int)((h + (uint32_t)(now_ms() / 95)) % 8);
+        RGB c = NEURONPAL[band];
+        double action = 0.72 + 0.28 * sin(now_ms() * 0.006 + cx * 0.91 + cy * 1.37);
+        if (degree >= 3) c = lerp(c, (RGB){255, 150, 230}, 0.22);
+        return scalec(c, pulse * action);
+    }
+    int band = degree + (h % 3 == 0 ? 1 : 0);
+    if (band > 7) band = 7;
+    double breathe = 0.82 + 0.16 * sin(now_ms() * 0.0012 + cx * 0.23 + cy * 0.41);
+    return scalec(MYCELIUMPAL[band], pulse * breathe);
+}
 static double hillshade(int cx, int cy, int tile) {
     int e0 = tiles_[tile].e[0] >> 4;
     int g = 0;
@@ -1094,11 +1333,21 @@ typedef struct { uint8_t *b; size_t n, cap; } Buf;
 static void buf_init(Buf *x) { x->b = NULL; x->n = x->cap = 0; }
 static void buf_put(Buf *x, const void *p, size_t n) {
     if (!n) return;
-    if (x->n + n > x->cap) {
-        x->cap = x->cap ? x->cap : 4096;
-        while (x->n + n > x->cap) x->cap *= 2;
-        x->b = realloc(x->b, x->cap);
-        if (!x->b) { perror("realloc"); exit(1); }
+    if (n > SIZE_MAX - x->n) {
+        fputs("buffer too large\n", stderr);
+        exit(1);
+    }
+    size_t need = x->n + n;
+    if (need > x->cap) {
+        size_t cap = x->cap ? x->cap : 4096;
+        while (cap < need) {
+            if (cap > SIZE_MAX / 2) { cap = need; break; }
+            cap *= 2;
+        }
+        uint8_t *nb = realloc(x->b, cap);
+        if (!nb) { perror("realloc"); exit(1); }
+        x->b = nb;
+        x->cap = cap;
     }
     memcpy(x->b + x->n, p, n);
     x->n += n;
@@ -1118,11 +1367,20 @@ static void frame_end(void) { fputs("\x1b[?2026l", stdout); fflush(stdout); }
 static char *fb_; static size_t fblen_, fbcap_;
 static void fb_reset(void) { fblen_ = 0; }
 static void fb_reserve(size_t n) {
-    if (fblen_ + n > fbcap_) {
-        fbcap_ = fbcap_ ? fbcap_ * 2 : 1 << 20;
-        while (fblen_ + n > fbcap_) fbcap_ *= 2;
-        fb_ = realloc(fb_, fbcap_);
+    if (n > SIZE_MAX - fblen_) {
+        fputs("framebuffer too large\n", stderr);
+        exit(1);
+    }
+    size_t need = fblen_ + n;
+    if (need > fbcap_) {
+        size_t cap = fbcap_ ? fbcap_ : (size_t)1 << 20;
+        while (cap < need) {
+            if (cap > SIZE_MAX / 2) { cap = need; break; }
+            cap *= 2;
+        }
+        fb_ = realloc(fb_, cap);
         if (!fb_) { perror("realloc"); exit(1); }
+        fbcap_ = cap;
     }
 }
 static void fb_puts(const char *s) {
@@ -1267,16 +1525,17 @@ static void render_help(void) {
         "  modes: circuit terrain truchet fire waves dungeon",
         "  maze galaxy city aurora matrix pipes mondrian",
         "  koi lava sakura geode lantern dunes",
-        "  reef stained",
+        "  reef stained streets neurons mycelium",
         "",
         "  space   new map              m     next mode",
         "  y       color theme          c     auto-cycle modes",
         "  +/-     collapse speed       p     pause",
-        "  g       record gif           s     save bmp",
+        "  g       record gif           s     save image",
         "  h       this help            z     all-worlds sheet\n",
         "  r       raytrace view        e     entropy view\n",
         "  i       isometric view       , .    scrub time\n",
-        "  T       thermo solver        wasd  hero walk\n",
+        "  T       thermo solver        R     reset thermo learning\n",
+        "  wasd    hero walk\n",
         "  n       zen: worlds morph    q     quit",
         "",
         "  mouse: left-click force-collapse a cell,",
@@ -1464,13 +1723,12 @@ static void zen_capture(void) {
 
 static void paint_cell(int wx, int wy, int sub, double pulse) {
     const char *mode = MODES[g_mode_idx];
-    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_truchet = !strcmp(mode, "truchet"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained");
+    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_truchet = !strcmp(mode, "truchet"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium");
     bool braille = !m_terrain;
             if (g_entropy_view && pc64(dom_[IDX(wx, wy)]) > 1) {
                 int k2 = pc64(dom_[IDX(wx, wy)]);
                 float frac2 = 1.0f - k2 / (float)ntiles_;
                 RGB heat = hsv(50 + 300 * frac2, 0.85, 0.85);
-                fb_fg(heat);
                 fb_fg(heat);
                 fb_bg(heat);
                 fb_puts(" ");
@@ -1508,7 +1766,6 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                                             bits = BRAILLE_BIT[(wx + wy) & 3][(wx >> 2) & 1];
                                             fb_fg(scalec((RGB){210, 180, 60}, pulse * blink));
                                             fb_braille(bits);
-                                            bits = 0;
                                             continue;
                                         }
                                     }
@@ -1591,6 +1848,18 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                                         col = lerp(CITYPAL[band], (RGB){255, 60, 50},
                                                    0.4 + 0.6 * bl2);
                                 }
+                            } else if (m_streets || m_neurons || m_mycelium) {
+                                bool netpx[8][8];
+                                art_circuit(t, netpx);
+                                bits = 0;
+                                for (int yy = 0; yy < 4; yy++)
+                                    for (int xx = 0; xx < 2; xx++)
+                                        if (netpx[chi * 2 + xx][sub * 4 + yy])
+                                            bits |= BRAILLE_BIT[yy][xx];
+                                col = network_color(mode, t, wx, wy, pulse);
+                                if (m_streets && !tiles_[t].e[0] && !tiles_[t].e[1] &&
+                                    !tiles_[t].e[2] && !tiles_[t].e[3])
+                                    col = scalec(network_bg(mode), pulse);
                             } else if (m_aurora) {
                                 int band = tiles_[t].e[0] >> 4;
                                 uint32_t h3 = hash3((uint32_t)(cx * 31 + chi), (uint32_t)cy, 123);
@@ -1966,6 +2235,14 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                                             bits |= BRAILLE_BIT[yy][xx];
                                 if (!bits) bits = 0xFF;
                                 col = scalec(col, pulse);
+                            } else if (m_streets || m_neurons || m_mycelium) {
+                                bool netpx[8][8];
+                                art_circuit(t, netpx);
+                                for (int yy = 0; yy < 4; yy++)
+                                    for (int xx = 0; xx < 2; xx++)
+                                        if (netpx[chi * 2 + xx][sub * 4 + yy])
+                                            bits |= BRAILLE_BIT[yy][xx];
+                                col = network_color(mode, t, wx, cy, pulse);
                             } else {
                                 bool px[8][8];
                                 if (m_circuit || m_pipes) art_circuit(t, px);
@@ -2010,6 +2287,9 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                             else if (!strcmp(shm, "aurora")) { da = (RGB){6, 12, 12}; db = (RGB){40, 110, 70}; }
                             else if (!strcmp(shm, "truchet")) { da = (RGB){20, 16, 24}; db = (RGB){130, 100, 180}; }
                             else if (!strcmp(shm, "maze")) { da = (RGB){16, 14, 20}; db = (RGB){100, 110, 130}; }
+                            else if (!strcmp(shm, "streets")) { da = (RGB){7, 10, 16}; db = (RGB){104, 92, 70}; }
+                            else if (!strcmp(shm, "neurons")) { da = (RGB){6, 3, 16}; db = (RGB){148, 42, 156}; }
+                            else if (!strcmp(shm, "mycelium")) { da = (RGB){4, 16, 12}; db = (RGB){74, 142, 78}; }
                             for (int yy = 0; yy < 4; yy++)
                                 for (int xx = 0; xx < 2; xx++)
                                     if ((hash3((uint32_t)cx, (uint32_t)cy,
@@ -2123,7 +2403,6 @@ static void render_twin_frame(long stepsA, long stepsB, double pulse) {
 }
 
 static void render_quad_frame(long steps, double pulse) {
-    (void)steps;
     (void)steps;
     const char *mode = MODES[g_mode_idx];
     bool braille = strcmp(mode, "terrain") != 0;
@@ -2279,8 +2558,7 @@ static void render_rt_frame(double tms) {
                 sinf((float)ang) * 4.6f);
     V3 ro = v3(center.x + off.x, center.y + off.y, center.z + off.z);
     V3 fwd = vnorm(vsub(center, ro));
-    V3 right = vnorm(v3(fwd.z * 0.0f + fwd.z, 0.0f, -fwd.x)); /* cross(up,fwd) */
-    right = vnorm(v3(fwd.z, 0.0f, -fwd.x));
+    V3 right = vnorm(v3(fwd.z, 0.0f, -fwd.x)); /* cross(up,fwd) */
     V3 up2 = vnorm(v3(
         fwd.y * -fwd.x,
         fwd.x * fwd.x + fwd.z * fwd.z,
@@ -2404,7 +2682,12 @@ static void render_frame(long steps, int attempts, double pulse) {
     /* dirty-cell state */
     size_t nsig = (size_t)W_ * H_ * 2;
     if (prev_sig_cap_ < nsig) {
-        prev_sig_ = realloc(prev_sig_, sizeof(uint32_t) * nsig);
+        uint32_t *next_sig = realloc(prev_sig_, sizeof(uint32_t) * nsig);
+        if (!next_sig) {
+            set_note("render buffer unavailable");
+            return;
+        }
+        prev_sig_ = next_sig;
         memset(prev_sig_, 0, sizeof(uint32_t) * nsig);
         prev_sig_cap_ = nsig;
         full_repaint_ = true;
@@ -2475,7 +2758,7 @@ static void render_frame(long steps, int attempts, double pulse) {
 /* ---------------- image sampling (shared by BMP + GIF export) ---------------- */
 static RGB img_px(int cx, int cy, int ix, int iy, int art) {
     const char *mode = MODES[g_mode_idx];
-    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained");
+    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium");
     uint64_t d = dom_[IDX(cx, cy)];
     if (pc64(d) != 1) {
         if (ghosting()) {
@@ -2693,6 +2976,11 @@ static RGB img_px(int cx, int cy, int ix, int iy, int art) {
         return line ? (RGB){16, 13, 12} : MONDPAL[band];
     }
     bool px[8][8];
+    if (m_streets || m_neurons || m_mycelium) {
+        art_circuit(t, px);
+        if (!px[ix][iy]) return network_bg(mode);
+        return network_color(mode, t, cx, cy, 1.0);
+    }
     if (m_circuit || m_pipes) art_circuit(t, px); else art_truchet(t, px);
     if (!px[ix][iy]) return C_BG;
     if (m_pipes) {
@@ -2705,21 +2993,36 @@ static RGB img_px(int cx, int cy, int ix, int iy, int art) {
 }
 
 /* ---------------- bmp export ---------------- */
-static void save_bmp(const char *path) {
+static bool image_dimensions(int art, int f, int *pw, int *ph) {
+    if (!pw || !ph || art <= 0 || f <= 0 || W_ <= 0 || H_ <= 0) return false;
+    uint64_t cell = (uint64_t)art * (uint64_t)f;
+    uint64_t w = (uint64_t)W_ * cell, h = (uint64_t)H_ * cell;
+    if (w > (uint64_t)INT_MAX || h > (uint64_t)INT_MAX ||
+        (h != 0 && w > UINT64_MAX / h) || w * h > (uint64_t)MAX_EXPORT_PIXELS)
+        return false;
+    *pw = (int)w;
+    *ph = (int)h;
+    return true;
+}
+
+static bool save_bmp(const char *path) {
     const char *mode = MODES[g_mode_idx];
     int art = strcmp(mode, "terrain") ? 8 : 16;
     int f = (strcmp(mode, "terrain") ? 6 : 4) * g_zoom;
-    int pw = W_ * art * f, ph = H_ * art * f;
+    int pw, ph;
+    if (!image_dimensions(art, f, &pw, &ph)) {
+        set_note("bmp too large (reduce --zoom or grid size)");
+        return false;
+    }
     size_t rowb = ((size_t)pw * 3 + 3) & ~(size_t)3;
-    FILE *fp = fopen(path, "wb");
-    if (!fp) { set_note("save failed: %s", strerror(errno)); return; }
     uint8_t hdr[54] = {0};
-    uint64_t tot = rowb * (size_t)ph;
+    uint64_t tot = (uint64_t)rowb * (uint64_t)ph;
     if (tot > 0xFFFFFFFFull - 54) { /* BMP sizes are 32-bit */
         set_note("bmp too large (%llux%llu)", (unsigned long long)pw, (unsigned long long)ph);
-        fclose(fp);
-        return;
+        return false;
     }
+    FILE *fp = fopen(path, "wb");
+    if (!fp) { set_note("save failed: %s", strerror(errno)); return false; }
     uint32_t imgsz = (uint32_t)tot;
     hdr[0] = 'B'; hdr[1] = 'M';
     hdr[2] = (uint8_t)((54 + imgsz));
@@ -2738,7 +3041,11 @@ static void save_bmp(const char *path) {
     hdr[29] = 0;
     bool ok = fwrite(hdr, 1, 54, fp) == 54;
     uint8_t *row = calloc(rowb, 1);
-    if (!row) { fclose(fp); return; }
+    if (!row) {
+        fclose(fp);
+        set_note("save failed: out of memory");
+        return false;
+    }
     for (int y = ph - 1; y >= 0 && ok; y--) {
         int cy = y / (art * f), iy = (y / f) % art;
         for (int x = 0; x < pw; x++) {
@@ -2752,6 +3059,7 @@ static void save_bmp(const char *path) {
     free(row);
     if (fclose(fp) != 0) ok = false;
     if (!ok) set_note("save failed (disk?)");
+    return ok;
 }
 
 /* cheap additive bloom: bright pixels bleed light */
@@ -2807,8 +3115,14 @@ static void apply_bloom(uint8_t *rgb, int w, int h) {
 
 /* shared top-down RGB raster for exports */
 static uint8_t *raster_rgb(int art, int f, int *ow, int *oh) {
-    int pw = W_ * art * f, ph = H_ * art * f;
-    uint8_t *raw = malloc((size_t)pw * ph * 3);
+    int pw, ph;
+    if (!image_dimensions(art, f, &pw, &ph)) {
+        if (ow) *ow = 0;
+        if (oh) *oh = 0;
+        return NULL;
+    }
+    size_t pixels = (size_t)pw * (size_t)ph;
+    uint8_t *raw = malloc(pixels * 3);
     if (!raw) { perror("malloc"); exit(1); }
     for (int y = 0; y < ph; y++) {
         int cy = y / (art * f), iy = (y / f) % art;
@@ -2847,16 +3161,34 @@ static void png_chunk_buf(Buf *o, const char *type, const uint8_t *data, uint32_
 /* encode an RGB buffer as PNG in memory */
 static Buf png_bytes(const uint8_t *rgb, int pw, int ph) {
     png_crc_init();
-    size_t rawlen = (size_t)(pw * 3 + 1) * ph;
+    if (!rgb || pw <= 0 || ph <= 0 ||
+        (uint64_t)(unsigned)pw * (uint64_t)(unsigned)ph > (uint64_t)MAX_EXPORT_PIXELS) {
+        fputs("invalid PNG dimensions\n", stderr);
+        exit(1);
+    }
+    size_t rowlen = (size_t)pw * 3 + 1;
+    if ((size_t)ph > SIZE_MAX / rowlen) {
+        fputs("PNG too large\n", stderr);
+        exit(1);
+    }
+    size_t rawlen = rowlen * (size_t)ph;
+    if (rawlen > (size_t)ULONG_MAX) {
+        fputs("PNG input too large\n", stderr);
+        exit(1);
+    }
     uint8_t *raw = malloc(rawlen);
     uLongf clen = compressBound((uLong)rawlen);
     uint8_t *comp = malloc(clen);
     if (!raw || !comp) { perror("malloc"); exit(1); }
     for (int y = 0; y < ph; y++) {
-        raw[(size_t)y * (pw * 3 + 1)] = 0;
-        memcpy(raw + (size_t)y * (pw * 3 + 1) + 1, rgb + (size_t)y * pw * 3, (size_t)pw * 3);
+        raw[(size_t)y * rowlen] = 0;
+        memcpy(raw + (size_t)y * rowlen + 1, rgb + (size_t)y * pw * 3, (size_t)pw * 3);
     }
-    compress2(comp, &clen, raw, rawlen, 6);
+    if (compress2(comp, &clen, raw, (uLong)rawlen, 6) != Z_OK || clen > UINT32_MAX) {
+        free(raw); free(comp);
+        fputs("PNG compression failed\n", stderr);
+        exit(1);
+    }
 
     Buf o;
     buf_init(&o);
@@ -2885,20 +3217,25 @@ static void png_chunk_buf(Buf *o, const char *type, const uint8_t *data, uint32_
     uint8_t cb[4] = {(uint8_t)(crc >> 24), (uint8_t)(crc >> 16), (uint8_t)(crc >> 8), (uint8_t)crc};
     buf_put(o, cb, 4);
 }
-static void save_png(const char *path) {
+static bool save_png(const char *path) {
     const char *mode = MODES[g_mode_idx];
     int art = strcmp(mode, "terrain") ? 8 : 16;
     int f = (strcmp(mode, "terrain") ? 6 : 4) * g_zoom;
     int pw, ph;
     uint8_t *rgb = raster_rgb(art, f, &pw, &ph);
+    if (!rgb) {
+        set_note("png too large (reduce --zoom or grid size)");
+        return false;
+    }
     Buf o = png_bytes(rgb, pw, ph);
     free(rgb);
     FILE *fp = fopen(path, "wb");
-    if (!fp) { set_note("save failed: %s", strerror(errno)); buf_free(&o); return; }
+    if (!fp) { set_note("save failed: %s", strerror(errno)); buf_free(&o); return false; }
     bool ok = fwrite(o.b, 1, o.n, fp) == o.n;
     if (fclose(fp) != 0) ok = false;
     if (!ok) set_note("save failed (disk?)");
     buf_free(&o);
+    return ok;
 }
 
 /* ---------------- web gallery export ---------------- */
@@ -2915,12 +3252,13 @@ static void b64_append(Buf *out, const uint8_t *d, size_t n) {
 }
 
 /* solve one small map of the given mode/seed with all post-passes */
-static void gallery_solve(int mode_idx, uint64_t seed, int w, int h) {
+static bool gallery_solve(int mode_idx, uint64_t seed, int w, int h) {
     setup_mode(mode_idx);
     g_seed = seed;
     rs_ = g_seed ^ 0xD1B54A32D192ED03ULL;
     W_ = w; H_ = h;
     grid_alloc(W_, H_);
+    bool solved = false;
     for (int tries = 0; tries < 1000; tries++) {
         grid_reset();
         bool done = false;
@@ -2929,51 +3267,89 @@ static void gallery_solve(int mode_idx, uint64_t seed, int w, int h) {
             if (r == 1) done = true;
             else if (r == -1) break;
         }
-        if (done) break;
+        if (done) { solved = true; break; }
     }
-    if (!strcmp(MODES[g_mode_idx], "terrain")) { carve_rivers(); g_river_show = n_river_; }
-    if (!strcmp(MODES[g_mode_idx], "circuit") || !strcmp(MODES[g_mode_idx], "pipes")) label_components();
+    if (solved && !strcmp(MODES[g_mode_idx], "terrain")) {
+        carve_rivers(); g_river_show = n_river_;
+    }
+    if (solved && (!strcmp(MODES[g_mode_idx], "circuit") || !strcmp(MODES[g_mode_idx], "pipes")))
+        label_components();
+    return solved;
 }
 /* solve every mode tiny; cache one color per cell */
 static RGB sheet_cell[NMODES][48][24];
 static int sheet_w[NMODES], sheet_h[NMODES];
 static void sheet_scan(void) {
-    /* snapshot the live world so the sheet doesn't destroy it */
-    int ow = W_, oh = H_;
-    uint64_t *odom = NULL;
-    if (ow > 0 && oh > 0) {
-        odom = malloc(sizeof(uint64_t) * (size_t)ow * oh);
-        if (odom) memcpy(odom, dom_, sizeof(uint64_t) * (size_t)ow * oh);
+    /* Snapshot the live world so preview generation is observational. */
+    int ow = W_, oh = H_, saved_mode = g_mode_idx;
+    size_t cells = (ow > 0 && oh > 0) ? (size_t)ow * (size_t)oh : 0;
+    if (!cells || !dom_ || !river_ || !river_rank_ || !comp_ || !comp_col_) {
+        set_note("sheet unavailable");
+        return;
     }
+    uint64_t *odom = malloc(sizeof(uint64_t) * cells);
+    uint8_t *oriver = malloc(cells);
+    int *orank = malloc(sizeof(int) * cells);
+    int *ocomp = malloc(sizeof(int) * cells);
+    RGB *ocomp_col = malloc(sizeof(RGB) * cells);
+    if (!odom || !oriver || !orank || !ocomp || !ocomp_col) {
+        free(odom); free(oriver); free(orank); free(ocomp); free(ocomp_col);
+        set_note("sheet unavailable: out of memory");
+        return;
+    }
+    memcpy(odom, dom_, sizeof(uint64_t) * cells);
+    memcpy(oriver, river_, cells);
+    memcpy(orank, river_rank_, sizeof(int) * cells);
+    memcpy(ocomp, comp_, sizeof(int) * cells);
+    memcpy(ocomp_col, comp_col_, sizeof(RGB) * cells);
+    uint64_t saved_seed = g_seed, saved_rs = rs_;
+    int saved_decided = g_decided, saved_n_comp = n_comp_;
+    int saved_n_river = n_river_, saved_river_show = g_river_show;
+    bool saved_comp_ready = g_comp_ready;
+    bool saved_hero_on = g_hero_on;
+    int saved_hx = g_hx, saved_hy = g_hy;
+    int saved_loot = g_loot, saved_loot_tot = g_loot_tot;
+    int saved_vx = g_vx, saved_vy = g_vy;
     int pw = W_ / 3 - 1, ph = H_ / 3 - 2;
     if (pw > 14) pw = 14;
     if (ph > 7) ph = 7;
     if (pw < 4) pw = 4;
     if (ph < 3) ph = 3;
     for (int mi = 0; mi < NMODES; mi++) {
-        gallery_solve(mi, 42, pw, ph);
+        bool solved = gallery_solve(mi, 42, pw, ph);
         sheet_w[mi] = pw;
         sheet_h[mi] = ph;
         int art = strcmp(MODES[mi], "terrain") ? 8 : 16;
         for (int y = 0; y < ph; y++)
             for (int x = 0; x < pw; x++) {
                 int ix = art / 2, iy = art / 2;
-                RGB c = img_px(x, y, ix, iy, art);
+                RGB c = solved ? img_px(x, y, ix, iy, art) : C_BG;
                 sheet_cell[mi][y][x] = c;
             }
     }
-    setup_mode(g_mode_idx);   /* restore selected mode */
-    g_seed = rnd();
-    /* restore live world dimensions & state */
-    if (ow > 0 && oh > 0) {
-        W_ = ow; H_ = oh;
-        grid_alloc(ow, oh);
-        if (odom) memcpy(dom_, odom, sizeof(uint64_t) * (size_t)ow * oh);
-        free(odom);
-    }
+    setup_mode(saved_mode);
+    g_seed = saved_seed;
+    rs_ = saved_rs;
+    W_ = ow; H_ = oh;
+    grid_alloc(ow, oh);
+    memcpy(dom_, odom, sizeof(uint64_t) * cells);
+    memcpy(river_, oriver, cells);
+    memcpy(river_rank_, orank, sizeof(int) * cells);
+    memcpy(comp_, ocomp, sizeof(int) * cells);
+    memcpy(comp_col_, ocomp_col, sizeof(RGB) * cells);
+    free(odom); free(oriver); free(orank); free(ocomp); free(ocomp_col);
+    n_comp_ = saved_n_comp;
+    n_river_ = saved_n_river;
+    g_river_show = saved_river_show;
+    g_comp_ready = saved_comp_ready;
+    g_decided = saved_decided;
+    g_hero_on = saved_hero_on;
+    g_hx = saved_hx; g_hy = saved_hy;
+    g_loot = saved_loot; g_loot_tot = saved_loot_tot;
+    g_vx = saved_vx; g_vy = saved_vy;
+    world_sync();
     apply_bias();
     full_repaint_ = true;
-    g_vx = 0; g_vy = 0;
 }
 
 static void render_sheet(void) {
@@ -3014,7 +3390,7 @@ static void render_sheet(void) {
     fb_puts("\x1b[0m");
     fb_fg((RGB){100, 120, 150});
     fb_puts("\x1b[1;1H");
-    fb_puts("  wfc sheet \xe2\x80\x94 all fifteen worlds\xe2\x80\xa6 live\xe2\x80\xa6 (z to close) \xe2\x94\x82 [m]ode selected: ");
+    fb_puts("  wfc sheet \xe2\x80\x94 all twenty-four worlds\xe2\x80\xa6 live\xe2\x80\xa6 (z to close) \xe2\x94\x82 [m]ode selected: ");
     fb_fg((RGB){74, 222, 128});
     fb_puts(MODES[g_mode_idx]);
     frame_begin();
@@ -3022,7 +3398,7 @@ static void render_sheet(void) {
     frame_end();
 }
 
-static void run_gallery(const char *htmlpath) {
+static bool run_gallery(const char *htmlpath) {
     static const uint64_t seeds[3] = {7, 42, 2026};
     int gw = 36, gh = 20;
     Buf page;
@@ -3042,12 +3418,18 @@ static void run_gallery(const char *htmlpath) {
     int made = 0;
     for (int mi = 0; mi < NMODES; mi++)
         for (int si = 0; si < 3; si++) {
-            gallery_solve(mi, seeds[si], gw, gh);
-            int art = strcmp(MODES[mi], "terrain") ? 8 : 16;
-            int f = strcmp(MODES[mi], "terrain") ? 3 : 3;
-            int pw, ph;
-            uint8_t *rgb = raster_rgb(art, f, &pw, &ph);
-            Buf img = png_bytes(rgb, pw, ph);
+        bool solved = gallery_solve(mi, seeds[si], gw, gh);
+        int art = strcmp(MODES[mi], "terrain") ? 8 : 16;
+        int f = strcmp(MODES[mi], "terrain") ? 3 : 3;
+        int pw, ph;
+        uint8_t *rgb = raster_rgb(art, f, &pw, &ph);
+        if (!rgb) {
+            fprintf(stderr, "gallery: raster allocation failed for %s\n", MODES[mi]);
+            continue;
+        }
+        if (!solved) fprintf(stderr, "gallery: solver failed for %s seed %llu\n",
+                             MODES[mi], (unsigned long long)seeds[si]);
+        Buf img = png_bytes(rgb, pw, ph);
             free(rgb);
             char head[256];
             snprintf(head, sizeof head,
@@ -3065,18 +3447,30 @@ static void run_gallery(const char *htmlpath) {
         }
     buf_puts(&page, "</div></body></html>");
     FILE *fp = fopen(htmlpath, "wb");
-    if (fp) { fwrite(page.b, 1, page.n, fp); fclose(fp); }
+    bool ok = false;
+    if (fp) {
+        bool wrote = fwrite(page.b, 1, page.n, fp) == page.n;
+        int close_rc = fclose(fp);
+        ok = wrote && close_rc == 0;
+    }
     buf_free(&page);
     fprintf(stderr, "\n");
+    if (!ok) {
+        fprintf(stderr, "gallery: failed to write %s: %s\n", htmlpath, strerror(errno));
+        return false;
+    }
     printf("gallery: %s (%d maps)\n", htmlpath, made);
+    return true;
 }
 
 /* ---------------- terminal / input ---------------- */
 
 /* dispatch by extension */
-static void save_image(const char *path) {
-    if (strstr(path, ".png")) save_png(path);
-    else save_bmp(path);
+static bool save_image(const char *path) {
+    const char *dot = strrchr(path, '.');
+    if (dot && (!strcmp(dot, ".png") || !strcmp(dot, ".PNG")))
+        return save_png(path);
+    return save_bmp(path);
 }
 
 /* ---------------- animated gif export (pure C, GIF89a) ---------------- */
@@ -3087,6 +3481,7 @@ static uint8_t qidx(RGB c) {
 }
 
 static int16_t (*gif_kids)[256];
+#define GIF_KID_ROWS 512
 static void gif_emit(Buf *o, int code, int width, int *accbits, int *acc) {
     *acc |= code << *accbits;
     *accbits += width;
@@ -3099,11 +3494,11 @@ static void gif_emit(Buf *o, int code, int width, int *accbits, int *acc) {
 }
 static void gif_lzw_frame(Buf *o, const uint8_t *pix, size_t n) {
     if (!gif_kids) {
-        gif_kids = malloc(sizeof(int16_t) * 4096 * 256);
+        gif_kids = malloc(sizeof *gif_kids * GIF_KID_ROWS);
         if (!gif_kids) { perror("malloc"); exit(1); }
     }
     /* fixed 9-bit codes: reset dictionary before it could outgrow 9 bits */
-    memset(gif_kids, -1, sizeof(int16_t) * 4096 * 256);
+    memset(gif_kids, -1, sizeof *gif_kids * GIF_KID_ROWS);
     int width = 9, next = 258, acc = 0, ab = 0;
     gif_emit(o, 256, width, &ab, &acc);
     int cur = pix[0];
@@ -3112,7 +3507,7 @@ static void gif_lzw_frame(Buf *o, const uint8_t *pix, size_t n) {
         if (gif_kids[cur][k] >= 0) { cur = gif_kids[cur][k]; continue; }
         gif_emit(o, cur, width, &ab, &acc);
         if (next >= 511) {
-            memset(gif_kids, -1, sizeof(int16_t) * 4096 * 256);
+            memset(gif_kids, -1, sizeof *gif_kids * GIF_KID_ROWS);
             next = 258;
             gif_emit(o, 256, width, &ab, &acc);
         } else {
@@ -3185,9 +3580,13 @@ static void capture_frame(void) {
     g_frames[g_nframes].ph = ph;
     g_nframes++;
 }
-static void write_gif(const char *path) {
-    if (!g_nframes) return;
+static bool write_gif(const char *path) {
+    if (!path || !g_nframes) return false;
     int pw = g_frames[0].pw, ph = g_frames[0].ph;
+    if (pw <= 0 || ph <= 0 || pw > UINT16_MAX || ph > UINT16_MAX) {
+        set_note("gif dimensions unsupported");
+        return false;
+    }
     Buf o;
     buf_init(&o);
     buf_put(&o, "GIF89a", 6);
@@ -3195,6 +3594,7 @@ static void write_gif(const char *path) {
     buf_u8(&o, 0xF7); buf_u8(&o, 0); buf_u8(&o, 0);
     gif_palette(&o);
     buf_put(&o, "\x21\xFF\x0BNETSCAPE2.0\x03\x01\x00\x00\x00", 19);
+    int written = 0;
     for (int i = 0; i < g_nframes; i++) {
         if (g_frames[i].pw != pw || g_frames[i].ph != ph) continue; /* resize mid-recording */
         buf_put(&o, "\x21\xF9\x04\x00\x28\x00\x00\x00", 8); /* 40cs = 400ms? no: 0x28=40 -> 0.4s */
@@ -3207,16 +3607,20 @@ static void write_gif(const char *path) {
         gif_lzw_frame(&lw, g_frames[i].px, (size_t)pw * ph);
         gif_blocks(&o, lw.b, lw.n);
         buf_free(&lw);
+        written++;
     }
+    if (!written) { buf_free(&o); return false; }
     buf_u8(&o, 0x3B);
+    bool ok = false;
     FILE *fp = fopen(path, "wb");
     if (fp) {
-        bool ok = fwrite(o.b, 1, o.n, fp) == o.n;
+        ok = fwrite(o.b, 1, o.n, fp) == o.n;
         if (fclose(fp) != 0) ok = false;
         if (!ok) set_note("gif failed (disk?)");
     }
     else set_note("gif failed: %s", strerror(errno));
     buf_free(&o);
+    return ok;
 }
 
 /* ---------------- inline-image graphics (iTerm2/WezTerm OSC 1337) ---------------- */
@@ -3258,26 +3662,30 @@ static bool gfx_supported(void) {
 /* draw one full-res frame of the current grid as an inline image */
 static void emit_frame_img(void) {
     int art = strcmp(MODES[g_mode_idx], "terrain") ? 8 : 16;
-    int f = 16 / art;
-    int pw = W_ * (g_quad ? 32 : (g_twin ? 32 : 16)), ph = H_ * (g_quad ? 32 : 16);
-    if (pw > 2048) { pw /= 2; ph /= 2; }
+    int raw_pw = W_ * (g_quad || g_twin ? 32 : 16);
+    int raw_ph = H_ * (g_quad ? 32 : 16);
+    int image_scale = 1;
+    while (raw_pw / image_scale > 2048 || raw_ph / image_scale > 2048)
+        image_scale *= 2;
+    int cell_px = 16 / image_scale;
+    int pw = raw_pw / image_scale, ph = raw_ph / image_scale;
     uint8_t *rgb = malloc((size_t)pw * ph * 3);
     if (!rgb) { perror("malloc"); exit(1); }
     for (int y = 0; y < ph; y++) {
         int qrow = g_quad ? (y >= ph / 2) : 0;
-        int cy = qrow ? (y - ph / 2) / 16 : y / 16;
-        int iy = (y / f) % art;
+        int local_y = y - qrow * (g_quad ? ph / 2 : 0);
+        int cy = local_y / cell_px;
+        int iy = (local_y % cell_px) * art / cell_px;
         for (int x = 0; x < pw; x++) {
             int qcol = g_quad ? (x >= pw / 2) : (g_twin && x >= pw / 2);
-            int cx = qcol ? (x - pw / 2) / 16 : x / 16;
-            int ix = (x / f) % art;
+            int local_x = x - qcol * (g_nworlds > 1 ? pw / 2 : 0);
+            int cx = local_x / cell_px;
+            int ix = (local_x % cell_px) * art / cell_px;
             uint64_t *saved = dom_;
-            int saved_w = W_;
-            if (g_nworlds > 1)
-                dom_ = (qrow * 2 + qcol) == 0 ? dom_
-                     : (qrow * 2 + qcol) == 1 ? domB_
-                     : (qrow * 2 + qcol) == 2 ? domC_ : domD_;
-            if (g_nworlds > 1) W_ = saved_w; /* world width unchanged */
+            if (g_nworlds > 1) {
+                int slot = qrow * 2 + qcol;
+                dom_ = slots_dom[slot] ? slots_dom[slot] : saved;
+            }
             RGB c = img_px(cx, cy, ix, iy, art);
             dom_ = saved;
             size_t i = ((size_t)y * pw + x) * 3;
@@ -3293,7 +3701,7 @@ static void emit_frame_img(void) {
     char head[128];
     snprintf(head, sizeof head,
              "\x1b]1337;File=inline=1;size=%dx%d;height=%d;preserveAspectRatio=1;base64:",
-             pw, ph, H_ + 1);
+             pw, ph, (g_quad ? H_ * 2 : H_) + 1);
     if (g_gfx == 2) {
         /* kitty graphics protocol: chunked APC with fixed image id (replaces) */
         fputs("\x1b[H", stdout);
@@ -3372,7 +3780,7 @@ static void ensure_sfx(void) {
     }
     write_wav("/tmp/wfc_blip.wav", blip, 2600);
     /* per-world stingers */
-    static const char *names[NMODES] = {"circuit","terrain","truchet","fire","waves","dungeon","maze","galaxy","city","aurora","matrix","pipes","mondrian","koi","lava","sakura","geode","lantern","dunes","reef","stained"};
+    static const char *names[NMODES] = {"circuit","terrain","truchet","fire","waves","dungeon","maze","galaxy","city","aurora","matrix","pipes","mondrian","koi","lava","sakura","geode","lantern","dunes","reef","stained","streets","neurons","mycelium"};
     for (int mi2 = 0; mi2 < NMODES; mi2++) {
         static float st[44100 / 2];
         for (int i = 0; i < 22050; i++) st[i] = 0;
@@ -3398,6 +3806,9 @@ static void ensure_sfx(void) {
             {{147,0},{220,0.14},{196,0.28},{294,0.42},{0,0}},
             {{523,0},{659,0.1},{784,0.2},{988,0.3},{0,0}},
             {{392,0},{587,0.14},{784,0.28},{1175,0.42},{0,0}},
+            {{196,0},{294,0.14},{392,0.28},{587,0.42},{0,0}},
+            {{220,0},{330,0.10},{440,0.20},{660,0.30},{0,0}},
+            {{147,0},{196,0.14},{247,0.28},{330,0.42},{0,0}},
         };
         for (int nn2 = 0; nn2 < 5 && seq[mi2][nn2][0] > 0; nn2++) {
             int start = (int)(seq[mi2][nn2][1] * SR);
@@ -3453,7 +3864,7 @@ static void ensure_ambient(int mi) {
     static const float roots[NMODES] = {
         110.0f, 98.0f, 164.8f, 87.3f, 73.4f, 61.7f, 82.4f, 130.8f,
         73.4f, 110.0f, 92.5f, 87.3f, 123.5f, 98.0f, 61.7f,
-        116.5f, 146.8f, 82.4f, 87.3f, 98.0f, 110.0f,
+        116.5f, 146.8f, 82.4f, 87.3f, 98.0f, 110.0f, 98.0f, 220.0f, 73.4f,
     };
     double f = roots[mi];
     double lfo1 = 1.0 / AMBIENT_SECS, lfo2 = 3.0 / AMBIENT_SECS;
@@ -3566,17 +3977,21 @@ static void speed_changed(void) {
  * This is the WFC problem *as a graphical model*: cells = categorical
  * nodes, cdir = pairwise energy, tile weights = unary.
  *
- * Every failure mode falls back to the classic solver with a note (the
- * piped child needs `python3` + `thrml`; if it isn't installed, or the
- * anneal misses a valid state, we degrade gracefully).
+ * The sidecar is a long-lived JSONL worker. C remains authoritative for
+ * domains, propagation, rollback, and deterministic quality; the worker
+ * proposes soft assignments and learns only from C's reward.
  *
  * Env: WFC_PYTHON -> interpreter (default python3)
  *      WFC_THERMO_PY -> path to wfc_thermo.py (default ./wfc_thermo.py)
  */
 static bool g_thermo = false;
 static char g_thermo_form[8] = "potts";
+static bool g_thermo_learn = true;
+static char g_thermo_profile[512] = "";
+static bool g_thermo_reset_learning = false;
 static int thermo_pid_ = -1;
-static char thermo_spec_[600] = "";
+static int thermo_in_fd_ = -1;
+static FILE *thermo_in_ = NULL;
 static int thermo_fd_ = -1;
 static FILE *thermo_fp_ = NULL;
 static double thermo_t0_ = 0;
@@ -3585,55 +4000,49 @@ static long thermo_bad_ = 0;
 static int thermo_pbits_ = 0;
 static int thermo_launches_ = 0;
 static bool thermo_inflight_ = false;
+static bool thermo_ready_ = false;
+static bool thermo_waiting_sample_ = false;
+static bool thermo_waiting_feedback_ = false;
+static bool thermo_reset_pending_ = false;
+static double thermo_beta_ = 0;
+static double thermo_confidence_ = 0;
+static long thermo_observations_ = 0;
+static double thermo_quality_ = 0;
+static uint64_t *thermo_snap_ = NULL;
+static size_t thermo_snap_cap_ = 0;
 
 static void thermo_kill(void) {
+    if (thermo_in_) { fclose(thermo_in_); thermo_in_ = NULL; thermo_in_fd_ = -1; }
+    if (thermo_fp_) { fclose(thermo_fp_); thermo_fp_ = NULL; thermo_fd_ = -1; }
     if (thermo_pid_ > 0) {
         kill(thermo_pid_, SIGKILL);
         waitpid(thermo_pid_, NULL, 0); /* reap so we don't leak zombies */
         thermo_pid_ = -1;
-        if (thermo_spec_[0]) unlink(thermo_spec_); /* only safe once the child is gone */
     }
-    if (thermo_fp_) { fclose(thermo_fp_); thermo_fp_ = NULL; thermo_fd_ = -1; } /* fclose closed the fd */
-    else if (thermo_fd_ >= 0) { close(thermo_fd_); thermo_fd_ = -1; }
     thermo_inflight_ = false;
+    thermo_ready_ = false;
+    thermo_waiting_sample_ = false;
+    thermo_waiting_feedback_ = false;
 }
 
-static void thermo_write_spec(const char *path) {
-    FILE *f = fopen(path, "w");
-    if (!f) return;
-    fprintf(f, "{\"w\":%d,\"h\":%d,\"ntiles\":%d,\"seed\":%llu,\"torus\":%d,"
-               "\"smooth\":%d,"
-               "\"form\":\"%s\",\"steps\":%d,\"chains\":%d,"
-               "\"unary\":[",
-            W_, H_, ntiles_, (unsigned long long)g_seed,
-            g_torus ? 1 : 0, g_smooth ? 1 : 0, g_thermo_form,
-            ntiles_ > 16 ? 240 : (W_ * H_ > 900 ? 150 : 190),
-            ntiles_ > 16 ? 40 : (W_ * H_ > 900 ? 16 : 24));
-    for (int i = 0; i < ntiles_; i++)
-        fprintf(f, "%s%.6g", i ? "," : "", tiles_[i].weight);
-    fprintf(f, "],\"cdir\":[");
-    for (int d = 0; d < NDIR; d++) {
-        if (d) fputc(',', f);
-        fprintf(f, "[");
-        for (int a = 0; a < ntiles_; a++)
-            fprintf(f, "%s%llu", a ? "," : "", (unsigned long long)cdir_[d][a]);
-        fprintf(f, "]");
+static void thermo_json_string(FILE *f, const char *s) {
+    fputc('"', f);
+    for (const unsigned char *p = (const unsigned char *)s; p && *p; p++) {
+        if (*p == '"' || *p == '\\') fprintf(f, "\\%c", *p);
+        else if (*p == '\n') fputs("\\n", f);
+        else if (*p == '\r') fputs("\\r", f);
+        else if (*p == '\t') fputs("\\t", f);
+        else if (*p < 32) fprintf(f, "\\u%04x", *p);
+        else fputc(*p, f);
     }
-    fprintf(f, "],\"domains\":[");
-    for (int i = 0; i < W_ * H_; i++)
-        fprintf(f, "%s%llu", i ? "," : "", (unsigned long long)dom_[i]);
-    fprintf(f, "]}\n");
-    fclose(f);
+    fputc('"', f);
 }
 
 static char g_argv0[512] = "wfc";
 static bool thermo_launch(void) {
     if (g_gallery_path[0] || g_collage_path[0] || g_nworlds > 1 || g_inf) return false;
     if (getenv("WFC_NO_THERMO")) return false;
-    char spec[600], py[512];
-    snprintf(thermo_spec_, sizeof thermo_spec_, "/tmp/wfc_thermo_spec_%d.json", getpid());
-    snprintf(spec, sizeof spec, "%s", thermo_spec_);
-    thermo_write_spec(spec);
+    char py[512];
     const char *pyp = getenv("WFC_THERMO_PY");
     if (pyp) snprintf(py, sizeof py, "%s", pyp);
     else {
@@ -3647,34 +4056,63 @@ static bool thermo_launch(void) {
     }
     const char *pys = getenv("WFC_PYTHON");
     if (!pys) pys = "python3"; /* users with thrml in a venv: WFC_PYTHON=/path/venv/bin/python */
-    int pfd[2];
-    if (pipe(pfd) != 0) return false;
+    int in_pipe[2] = {-1, -1}, out_pipe[2] = {-1, -1};
+    if (pipe(in_pipe) != 0) return false;
+    if (pipe(out_pipe) != 0) {
+        close(in_pipe[0]); close(in_pipe[1]);
+        return false;
+    }
     pid_t pid = fork();
-    if (pid < 0) { close(pfd[0]); close(pfd[1]); return false; }
+    if (pid < 0) {
+        close(in_pipe[0]); close(in_pipe[1]);
+        close(out_pipe[0]); close(out_pipe[1]);
+        return false;
+    }
     if (pid == 0) {
-        close(pfd[0]);
-        dup2(pfd[1], STDOUT_FILENO);
-        close(pfd[1]);
-        int sfd = open(spec, O_RDONLY);
-        if (sfd >= 0) { dup2(sfd, STDIN_FILENO); close(sfd); }
+        close(in_pipe[1]);
+        close(out_pipe[0]);
+        dup2(in_pipe[0], STDIN_FILENO);
+        dup2(out_pipe[1], STDOUT_FILENO);
+        close(in_pipe[0]);
+        close(out_pipe[1]);
         /* silence jax/absl spam; keep our own stderr */
-        int dfd = open("/tmp/wfc_thermo_err.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (dfd >= 0) dup2(dfd, STDERR_FILENO);
+        int err_flags = O_WRONLY | O_CREAT | O_TRUNC;
+#ifdef O_NOFOLLOW
+        err_flags |= O_NOFOLLOW;
+#endif
+        int dfd = open("/tmp/wfc_thermo_err.log", err_flags, 0600);
+        if (dfd >= 0) {
+            (void)fchmod(dfd, 0600);
+            if (dfd != STDERR_FILENO) {
+                (void)dup2(dfd, STDERR_FILENO);
+                close(dfd);
+            }
+        }
         execlp(pys, pys, py, (char *)NULL);
         /* if the interpreter itself is missing, try `uv run python` auto-env */
         if (!getenv("WFC_THERMO_PY"))
             execlp("uv", "uv", "run", "--quiet", py, (char *)NULL);
         _exit(127);
     }
-    close(pfd[1]);
-    thermo_fd_ = pfd[0];
+    close(in_pipe[0]);
+    close(out_pipe[1]);
+    thermo_in_fd_ = in_pipe[1];
+    thermo_fd_ = out_pipe[0];
+    thermo_in_ = fdopen(thermo_in_fd_, "w");
+    if (!thermo_in_) {
+        close(thermo_in_fd_); thermo_in_fd_ = -1;
+        close(thermo_fd_); thermo_fd_ = -1;
+        kill(pid, SIGKILL); waitpid(pid, NULL, 0);
+        return false;
+    }
     /* non-blocking: the C loop keeps rendering while the anneal cools */
     int fl = fcntl(thermo_fd_, F_GETFL, 0);
     fcntl(thermo_fd_, F_SETFL, fl | O_NONBLOCK);
-    thermo_fp_ = fdopen(pfd[0], "r");
+    thermo_fp_ = fdopen(thermo_fd_, "r");
     if (!thermo_fp_) { /* child is running with nobody to read it */
         kill(pid, SIGKILL);
         waitpid(pid, NULL, 0);
+        fclose(thermo_in_); thermo_in_ = NULL; thermo_in_fd_ = -1;
         close(thermo_fd_);
         thermo_fd_ = -1;
         return false;
@@ -3682,8 +4120,67 @@ static bool thermo_launch(void) {
     thermo_pid_ = (int)pid;
     thermo_t0_ = now_ms();
     thermo_inflight_ = true;
+    thermo_ready_ = false;
+    thermo_waiting_sample_ = false;
+    thermo_waiting_feedback_ = false;
+    thermo_reset_pending_ = g_thermo_reset_learning;
+    g_thermo_reset_learning = false;
     thermo_launches_++;
     thermo_valid_ = false; /* a fresh run must earn its own result */
+    signal(SIGPIPE, SIG_IGN);
+
+    fprintf(thermo_in_, "{\"v\":1,\"t\":\"init\",\"mode\":");
+    thermo_json_string(thermo_in_, MODES[g_mode_idx]);
+    fprintf(thermo_in_, ",\"w\":%d,\"h\":%d,\"ntiles\":%d,\"seed\":%llu,"
+                     "\"torus\":%s,\"smooth\":%s,\"form\":\"%s\",\"learn\":%s,"
+                     "\"unary\":[",
+            W_, H_, ntiles_, (unsigned long long)g_seed,
+            g_torus ? "true" : "false", g_smooth ? "true" : "false", g_thermo_form,
+            g_thermo_learn ? "true" : "false");
+    for (int i = 0; i < ntiles_; i++)
+        fprintf(thermo_in_, "%s%.9g", i ? "," : "", tiles_[i].weight);
+    fputs("],\"cdir\":[", thermo_in_);
+    for (int d = 0; d < NDIR; d++) {
+        if (d) fputc(',', thermo_in_);
+        fputc('[', thermo_in_);
+        for (int a = 0; a < ntiles_; a++)
+            fprintf(thermo_in_, "%s%llu", a ? "," : "", (unsigned long long)cdir_[d][a]);
+        fputc(']', thermo_in_);
+    }
+    fputs("],\"domains\":[", thermo_in_);
+    for (int i = 0; i < W_ * H_; i++)
+        fprintf(thermo_in_, "%s%llu", i ? "," : "", (unsigned long long)dom_[i]);
+    fputs("]", thermo_in_);
+    if (g_thermo_profile[0]) {
+        fputs(",\"profile_dir\":", thermo_in_);
+        thermo_json_string(thermo_in_, g_thermo_profile);
+    }
+    fputs("}\n", thermo_in_);
+    if (fflush(thermo_in_) != 0 || ferror(thermo_in_)) {
+        thermo_kill();
+        return false;
+    }
+    return true;
+}
+
+static bool thermo_send_sample(void) {
+    if (!thermo_in_ || !thermo_ready_) return false;
+    int budget = W_ * H_ > 900 ? 8 : W_ * H_ > 300 ? 12 : 20;
+    double beta = ntiles_ > 16 ? 1.8 : 2.4;
+    fprintf(thermo_in_, "{\"v\":1,\"t\":\"sample\",\"domains\":[");
+    for (int i = 0; i < W_ * H_; i++)
+        fprintf(thermo_in_, "%s%llu", i ? "," : "", (unsigned long long)dom_[i]);
+    fprintf(thermo_in_, "],\"budget\":%d,\"beta_target\":%.6g}\n", budget, beta);
+    if (fflush(thermo_in_) != 0 || ferror(thermo_in_)) return false;
+    thermo_waiting_sample_ = true;
+    return true;
+}
+
+static bool thermo_send_reset(void) {
+    if (!thermo_in_ || !thermo_ready_) return false;
+    fputs("{\"v\":1,\"t\":\"reset\"}\n", thermo_in_);
+    if (fflush(thermo_in_) != 0 || ferror(thermo_in_)) return false;
+    thermo_waiting_feedback_ = true;
     return true;
 }
 
@@ -3704,29 +4201,169 @@ static long json_num(const char *s, const char *key, long fallback) {
     return atol(p);
 }
 
-static void thermo_apply_cfg(const char *s) {
-    const char *p = json_str(s, "cfg");
-    if (!p || *p != '[') return;
-    p++;
-    int i = 0;
-    while (*p && (*p == ' ' || *p == ',')) { p++; if (i == W_ * H_) break; }
-    while (*p && i < W_ * H_) {
-        if (*p < '0' || *p > '9') return;
-        long t = atol(p);
-        while (*p >= '0' && *p <= '9') p++;
-        if (t >= 0 && t < ntiles_) {
-            uint64_t m = (uint64_t)1 << t;
-            /* only accept tiles allowed by this cell's domain */
-            if ((dom_[i] >> t) & 1) dom_[i] = m;
-        }
-        while (*p == ' ' || *p == ',' || *p == ']') p++;
-        i++;
+static int thermo_context_index(int cell) {
+    int x = cell % W_, y = cell / W_, degree = 0, unresolved = 0;
+    for (int d = 0; d < NDIR; d++) {
+        int nx = x, ny = y;
+        if (d == 0) ny = g_torus ? (y + H_ - 1) % H_ : y - 1;
+        else if (d == 1) nx = g_torus ? (x + 1) % W_ : x + 1;
+        else if (d == 2) ny = g_torus ? (y + 1) % H_ : y + 1;
+        else nx = g_torus ? (x + W_ - 1) % W_ : x - 1;
+        if (nx < 0 || ny < 0 || nx >= W_ || ny >= H_) continue;
+        degree++;
+        if (pc64(dom_[IDX(nx, ny)]) != 1) unresolved++;
     }
+    int result = (degree < 4 ? 4 : 0) + (unresolved > 3 ? 3 : unresolved);
+    return result > 7 ? 7 : result;
 }
 
-/* poll the running thermo solver: 0 in progress, 1 solved, -1 failed.
- * the done line carries cfg[] (~4 bytes/cell), so grow the buffer on
- * demand instead of silently truncating large grids */
+static bool thermo_send_feedback(const int *cells, const int *tiles, int count,
+                                 int accepted, int rejected, int contradictions,
+                                 QualityMetrics before, QualityMetrics after) {
+    if (!thermo_in_) return false;
+    double reward = quality_reward(before, after, accepted, rejected);
+    thermo_quality_ = after.total;
+    fprintf(thermo_in_, "{\"v\":1,\"t\":\"feedback\",\"reward\":%.9g,"
+                     "\"quality\":%.9g,\"accepted\":%d,\"rejected\":%d,"
+                     "\"contradictions\":%d,\"tile_events\":[",
+            reward, after.total, accepted, rejected, contradictions);
+    for (int i = 0; i < count; i++)
+        fprintf(thermo_in_, "%s{\"index\":%d,\"value\":%.3g}",
+                i ? "," : "", tiles[i], accepted ? 1.0 : -1.0);
+    fputs("],\"pair_events\":[", thermo_in_);
+    bool first = true;
+    for (int i = 0; i < count; i++) {
+        int x = cells[i] % W_, y = cells[i] / W_;
+        for (int d = 0; d < NDIR; d++) {
+            int nx = x, ny = y;
+            if (d == 0) ny = g_torus ? (y + H_ - 1) % H_ : y - 1;
+            else if (d == 1) nx = g_torus ? (x + 1) % W_ : x + 1;
+            else if (d == 2) ny = g_torus ? (y + 1) % H_ : y + 1;
+            else nx = g_torus ? (x + W_ - 1) % W_ : x - 1;
+            if (nx < 0 || ny < 0 || nx >= W_ || ny >= H_) continue;
+            int n = IDX(nx, ny);
+            if (pc64(dom_[n]) != 1) continue;
+            int nt = __builtin_ctzll(dom_[n]);
+            int pair = (d * ntiles_ + tiles[i]) * ntiles_ + nt;
+            bool compatible = (cdir_[d][tiles[i]] >> nt) & 1ULL;
+            fprintf(thermo_in_, "%s{\"index\":%d,\"value\":%.3g}",
+                    first ? "" : ",", pair, accepted && compatible ? 1.0 : -1.0);
+            first = false;
+        }
+    }
+    fputs("],\"context_events\":[", thermo_in_);
+    for (int i = 0; i < count; i++)
+        fprintf(thermo_in_, "%s{\"index\":%d,\"value\":%.3g}",
+                i ? "," : "", thermo_context_index(cells[i]), accepted ? 1.0 : -1.0);
+    fprintf(thermo_in_, "],\"final\":%s}\n", g_decided == W_ * H_ ? "true" : "false");
+    if (fflush(thermo_in_) != 0 || ferror(thermo_in_)) return false;
+    thermo_waiting_feedback_ = true;
+    return true;
+}
+
+static bool thermo_apply_patch(const char *s) {
+    const char *p = json_str(s, "patch");
+    if (!p || *p != '[') return false;
+    int cells[32], tiles[32], count = 0;
+    p++;
+    for (;;) {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',') p++;
+        if (*p == ']') break;
+        if (*p != '{' || count >= 32) return false;
+        const char *end = strchr(p, '}');
+        if (!end) return false;
+        long cell = json_num(p, "i", -1), tile = json_num(p, "tile", -1);
+        if (cell < 0 || cell >= W_ * H_ || tile < 0 || tile >= ntiles_) return false;
+        for (int j = 0; j < count; j++) if (cells[j] == cell) return false;
+        cells[count] = (int)cell;
+        tiles[count] = (int)tile;
+        count++;
+        p = end + 1;
+    }
+    if (!count) return false;
+    size_t cells_n = (size_t)W_ * H_;
+    if (thermo_snap_cap_ < cells_n) {
+        uint64_t *next = realloc(thermo_snap_, sizeof(uint64_t) * cells_n);
+        if (!next) return false;
+        thermo_snap_ = next;
+        thermo_snap_cap_ = cells_n;
+    }
+    QualityMetrics before = quality_measure(false);
+    memcpy(thermo_snap_, dom_, sizeof(uint64_t) * cells_n);
+    bool ok = true;
+    for (int i = 0; i < count; i++) {
+        uint64_t mask = (uint64_t)1 << tiles[i];
+        if (!(dom_[cells[i]] & mask)) { ok = false; break; }
+        dom_[cells[i]] = mask;
+        if (!propagate_from(cells[i])) { ok = false; break; }
+    }
+    int accepted = ok ? count : 0;
+    int rejected = ok ? 0 : count;
+    int contradictions = ok ? 0 : 1;
+    if (!ok) memcpy(dom_, thermo_snap_, sizeof(uint64_t) * cells_n);
+    g_decided = 0;
+    for (size_t i = 0; i < cells_n; i++) if (pc64(dom_[i]) == 1) g_decided++;
+    QualityMetrics after = quality_measure(false);
+    return thermo_send_feedback(cells, tiles, count, accepted, rejected,
+                                contradictions, before, after);
+}
+
+static bool thermo_apply_cfg(const char *s) {
+    const char *p = json_str(s, "cfg");
+    if (!p || *p != '[') return false;
+    size_t cells = (size_t)W_ * (size_t)H_;
+    uint64_t *next = malloc(sizeof(uint64_t) * cells);
+    if (!next) return false;
+    p++;
+    for (size_t i = 0; i < cells; i++) {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (i > 0) {
+            if (*p != ',') { free(next); return false; }
+            p++;
+            while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        }
+        if (*p < '0' || *p > '9') { free(next); return false; }
+        errno = 0;
+        char *end = NULL;
+        unsigned long long tile = strtoull(p, &end, 10);
+        if (errno == ERANGE || end == p || tile >= (unsigned long long)ntiles_) {
+            free(next);
+            return false;
+        }
+        uint64_t mask = (uint64_t)1 << tile;
+        /* Only accept tiles allowed by this cell's original domain. */
+        if (!(dom_[i] & mask)) { free(next); return false; }
+        next[i] = mask;
+        p = end;
+    }
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p != ']') { free(next); return false; }
+
+    /* The sidecar is allowed to propose, never to redefine hard WFC rules.
+     * Re-check every directed neighbor pair before accepting its completion. */
+    for (size_t i = 0; i < cells; i++) {
+        int x = (int)(i % (size_t)W_), y = (int)(i / (size_t)W_);
+        int source = __builtin_ctzll(next[i]);
+        for (int d = 0; d < NDIR; d++) {
+            int nx = x, ny = y;
+            if (d == 0) ny = g_torus ? (y + H_ - 1) % H_ : y - 1;
+            else if (d == 1) nx = g_torus ? (x + 1) % W_ : x + 1;
+            else if (d == 2) ny = g_torus ? (y + 1) % H_ : y + 1;
+            else nx = g_torus ? (x + W_ - 1) % W_ : x - 1;
+            if (nx < 0 || ny < 0 || nx >= W_ || ny >= H_ || (nx == x && ny == y)) continue;
+            int target = __builtin_ctzll(next[IDX(nx, ny)]);
+            if (!((cdir_[d][source] >> target) & 1ULL)) {
+                free(next);
+                return false;
+            }
+        }
+    }
+    memcpy(dom_, next, sizeof(uint64_t) * cells);
+    free(next);
+    return true;
+}
+
+/* Poll the long-lived thermo worker: 0 in progress, 1 solved, -1 failed. */
 static char *thermo_lbuf = NULL;
 static size_t thermo_lbl = 0, thermo_lcap = 0;
 static int thermo_poll(void) {
@@ -3757,12 +4394,41 @@ static int thermo_poll(void) {
                 /* json.dumps puts a space after the colon: match key "t" */
                 const char *tp = json_str(s, "t");
                 if (tp && tp[0] == '"') {
-                    if (!strncmp(tp + 1, "meta", 4) && tp[5] == '"') {
+                    if (!strncmp(tp + 1, "ready", 5) && tp[6] == '"') {
+                        thermo_ready_ = true;
+                        thermo_pbits_ = (int)json_num(s, "pbits", thermo_pbits_);
+                        thermo_observations_ = json_num(s, "observations", thermo_observations_);
+                        set_note("thermo online â adaptive proposals (%s)",
+                                 strstr(s, "\"sampler\":\"thrml\"") ? "THRML" : "python");
+                        if (thermo_reset_pending_) {
+                            thermo_reset_pending_ = false;
+                            if (!thermo_send_reset()) goto thermo_fail;
+                        } else if (!thermo_send_sample()) goto thermo_fail;
+                    } else if (!strncmp(tp + 1, "meta", 4) && tp[5] == '"') {
                         thermo_pbits_ = (int)json_num(s, "pbits", 0);
+                    } else if (!strncmp(tp + 1, "stats", 5) && tp[6] == '"') {
+                        const char *bp = json_str(s, "beta");
+                        const char *cp = json_str(s, "confidence");
+                        thermo_beta_ = bp ? strtod(bp, NULL) : thermo_beta_;
+                        thermo_confidence_ = cp ? strtod(cp, NULL) : thermo_confidence_;
+                        thermo_bad_ = json_num(s, "bad", thermo_bad_);
+                    } else if (!strncmp(tp + 1, "proposal", 8) && tp[9] == '"') {
+                        if (!thermo_waiting_sample_ || !thermo_apply_patch(s)) goto thermo_fail;
+                        thermo_waiting_sample_ = false;
+                    } else if (!strncmp(tp + 1, "learn", 5) && tp[6] == '"') {
+                        thermo_observations_ = json_num(s, "observations", thermo_observations_);
+                        thermo_waiting_feedback_ = false;
+                        if (thermo_reset_pending_) {
+                            thermo_reset_pending_ = false;
+                            if (!thermo_send_reset()) goto thermo_fail;
+                        } else if (!thermo_send_sample()) goto thermo_fail;
                     } else if (!strncmp(tp + 1, "done", 4) && (tp[5] == '"' || tp[5] == ',')) {
                         thermo_valid_ = json_num(s, "valid", 0) > 0;
                         thermo_bad_ = json_num(s, "bad", -1);
-                        thermo_apply_cfg(s);
+                        if (thermo_valid_ && !thermo_apply_cfg(s)) {
+                            thermo_valid_ = false;
+                            goto thermo_fail;
+                        }
                         if (thermo_valid_) {
                             thermo_kill();
                             g_decided = W_ * H_;
@@ -3770,6 +4436,8 @@ static int thermo_poll(void) {
                                      g_thermo_form, thermo_pbits_);
                             return 1;
                         }
+                        goto thermo_fail;
+                    } else if (!strncmp(tp + 1, "fatal", 5) && tp[6] == '"') {
                         goto thermo_fail;
                     }
                 }
@@ -3822,8 +4490,13 @@ static void hist_push(void) {
         hist_bufs_[HIST_N - 1] = drop;
         memcpy(drop, dom_, sizeof(uint64_t) * (size_t)W_ * H_);
     } else {
-        if (!hist_bufs_[hist_len_])
+        if (!hist_bufs_[hist_len_]) {
             hist_bufs_[hist_len_] = malloc(sizeof(uint64_t) * (size_t)W_ * H_);
+            if (!hist_bufs_[hist_len_]) {
+                set_note("history unavailable");
+                return;
+            }
+        }
         memcpy(hist_bufs_[hist_len_], dom_, sizeof(uint64_t) * (size_t)W_ * H_);
         hist_len_++;
     }
@@ -3930,17 +4603,23 @@ static void fast_solve(void) {
         }
     }
 }
-static void undo_push(void) {
-    if (!snap_) return;
-    if (!undo_[undo_pos_]) undo_[undo_pos_] = malloc(sizeof(uint64_t) * (size_t)W_ * H_);
+static bool undo_push(void) {
+    if (!snap_) return false;
+    if (!undo_[undo_pos_]) {
+        undo_[undo_pos_] = malloc(sizeof(uint64_t) * (size_t)W_ * H_);
+        if (!undo_[undo_pos_]) return false;
+    }
     memcpy(undo_[undo_pos_], dom_, sizeof(uint64_t) * (size_t)W_ * H_);
     undo_pos_ = (undo_pos_ + 1) % UNDO_N;
     if (undo_len_ < UNDO_N) undo_len_++;
+    return true;
 }
 static bool undo_pop(void) {
     if (undo_len_ == 0) return false;
-    undo_pos_ = (undo_pos_ - 1 + UNDO_N) % UNDO_N;
-    memcpy(dom_, undo_[undo_pos_], sizeof(uint64_t) * (size_t)W_ * H_);
+    int previous = (undo_pos_ - 1 + UNDO_N) % UNDO_N;
+    if (!undo_[previous]) return false;
+    memcpy(dom_, undo_[previous], sizeof(uint64_t) * (size_t)W_ * H_);
+    undo_pos_ = previous;
     undo_len_--;
     return true;
 }
@@ -3982,7 +4661,7 @@ static void handle_click(int btn, int px, int py) {
                 if (!((cdir_[d][b] >> tn) & 1)) m &= ~(1ULL << b);
         }
         if (!m) { set_note("carve refused"); return; }
-        undo_push();
+        if (!undo_push()) { set_note("undo unavailable"); return; }
         dom_[cell] = m;
         set_note("carved (%d,%d)", cx2, cy2);
         return;
@@ -3990,7 +4669,7 @@ static void handle_click(int btn, int px, int py) {
 
     /* left-click: force collapse */
     if (pc64(dom_[cell]) <= 1) return;
-    undo_push();
+    if (!undo_push()) { set_note("undo unavailable"); return; }
     dom_[cell] = 1ULL << weighted_pick(dom_[cell]);
     if (propagate_from(cell)) { set_note("seeded (%d,%d)", cx, cy); if (g_sound) { ensure_sfx(); play_sfx("/tmp/wfc_blip.wav"); } }
     else {
@@ -4166,6 +4845,7 @@ static int pump_keys(bool tty) {
             int f2 = strcmp(mode2, "terrain") ? 6 : 4;
             int pw2, ph2;
             uint8_t *rgb2 = raster_rgb(art2, f2, &pw2, &ph2);
+            if (!rgb2) { set_note("clipboard shot too large"); continue; }
             Buf img2 = png_bytes(rgb2, pw2, ph2);
             free(rgb2);
             FILE *fp2 = fopen("/tmp/wfc_shot.png", "wb");
@@ -4186,6 +4866,15 @@ static int pump_keys(bool tty) {
                 thermo_kill();
                 full_repaint_ = true;
                 set_note("thermo solver %s (Extropic THRML)", g_thermo ? "ON" : "off");
+            }
+        }
+        else if (c == 'R') {
+            if (thermo_inflight_ && thermo_ready_) {
+                thermo_reset_pending_ = true;
+                set_note("thermo learning reset on next round");
+            } else {
+                g_thermo_reset_learning = true;
+                set_note("thermo learning will reset on next run");
             }
         }
         else if (c == 'I') { /* slow-mo: quarter pace while solving */            g_slowmo = !g_slowmo;
@@ -4221,8 +4910,8 @@ static int pump_keys(bool tty) {
                 snprintf(path, sizeof path, "wfc-%s-%llu.png", MODES[g_mode_idx],
                          (unsigned long long)(g_seed % 100000000ULL));
             else snprintf(path, sizeof path, "%s", g_save_path);
-            save_image(path);
-            set_note("saved %s (%dx%d)", path, W_, H_);
+            if (save_image(path)) set_note("saved %s (%dx%d)", path, W_, H_);
+            else set_note("save failed: %s", path);
         }
     }
     return req;
@@ -4246,6 +4935,69 @@ static void pace(double dms) {
 
 /* ---------------- main ---------------- */
 
+static bool parse_long_range(const char *text, long min, long max, long *out) {
+    if (!text || !*text) return false;
+    errno = 0;
+    char *end = NULL;
+    long value = strtol(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' || value < min || value > max)
+        return false;
+    if (out) *out = value;
+    return true;
+}
+
+static bool parse_double_range(const char *text, double min, double max, double *out) {
+    if (!text || !*text) return false;
+    errno = 0;
+    char *end = NULL;
+    double value = strtod(text, &end);
+    if (errno == ERANGE || end == text || *end != '\0' || !isfinite(value) ||
+        value < min || value > max)
+        return false;
+    if (out) *out = value;
+    return true;
+}
+
+static bool parse_u64_decimal(const char *text, uint64_t *out) {
+    if (!text || !*text || *text == '-' || *text == '+') return false;
+    for (const char *p = text; *p; p++)
+        if (*p < '0' || *p > '9') return false;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' || value > UINT64_MAX)
+        return false;
+    if (out) *out = (uint64_t)value;
+    return true;
+}
+
+static uint64_t hash_seed_word(const char *text) {
+    uint64_t h = 1469598103934665603ULL;
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+        h ^= *p;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static bool parse_seed_value(const char *text, uint64_t *out) {
+    if (!text || !*text) return false;
+    bool digits = true;
+    for (const char *p = text; *p; p++) {
+        if (*p < '0' || *p > '9') { digits = false; break; }
+    }
+    if (digits) return parse_u64_decimal(text, out);
+    if (out) *out = hash_seed_word(text);
+    return true;
+}
+
+static int find_mode(const char *name) {
+    if (!name) return -1;
+    for (int i = 0; i < NMODES; i++)
+        if (!strcmp(name, MODES[i])) return i;
+    return -1;
+}
+
 static void cfg_expand(char *out, size_t cap) {
     const char *h = getenv("HOME");
     snprintf(out, cap, "%s/.wfcrc", h ? h : "/tmp");
@@ -4262,14 +5014,27 @@ static void cfg_load(void) {
         char *k = line, *v = eq + 1;
         v[strcspn(v, "\r\n")] = 0;
         if (!strcmp(k, "mode")) {
-            for (int k2 = 0; k2 < NMODES; k2++)
-                if (!strcmp(v, MODES[k2])) setup_mode(k2);
-        } else if (!strcmp(k, "theme")) g_theme = atoi(v);
-        else if (!strcmp(k, "speed")) g_speed = atol(v);
-        else if (!strcmp(k, "bias")) g_bias = atof(v) / 1000.0;
-        else if (!strcmp(k, "sound")) g_sound = atoi(v) != 0;
-        else if (!strcmp(k, "crt")) g_crt = atoi(v) != 0;
-        else if (!strcmp(k, "zen")) g_zen = atoi(v) != 0;
+            int mode = find_mode(v);
+            if (mode >= 0) setup_mode(mode);
+        } else if (!strcmp(k, "theme")) {
+            long value;
+            if (parse_long_range(v, 0, INT_MAX, &value)) g_theme = (int)value;
+        } else if (!strcmp(k, "speed")) {
+            long value;
+            if (parse_long_range(v, 1, MAX_SPEED, &value)) g_speed = value;
+        } else if (!strcmp(k, "bias")) {
+            double value;
+            if (parse_double_range(v, 40, 960, &value)) g_bias = value / 1000.0;
+        } else if (!strcmp(k, "sound")) {
+            long value;
+            if (parse_long_range(v, 0, 1, &value)) g_sound = value != 0;
+        } else if (!strcmp(k, "crt")) {
+            long value;
+            if (parse_long_range(v, 0, 1, &value)) g_crt = value != 0;
+        } else if (!strcmp(k, "zen")) {
+            long value;
+            if (parse_long_range(v, 0, 1, &value)) g_zen = value != 0;
+        }
     }
     fclose(f);
 }
@@ -4289,31 +5054,50 @@ int main(int argc, char **argv) {
         snprintf(g_argv0, sizeof g_argv0, "%s", a0);
     }
     cfg_load();
-#define NEXTV() (++i < argc ? argv[i] : (fprintf(stderr, "missing value for %s\n", argv[i]), exit(2), (char *)NULL))
+#define NEXTV() (++i < argc ? argv[i] : (fprintf(stderr, "missing value for %s\n", argv[i - 1]), exit(2), (char *)NULL))
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--mode")) {
             const char *m = NEXTV();
             int found = -1;
             for (int k = 0; k < NMODES; k++) if (!strcmp(m, MODES[k])) found = k;
-            if (found < 0) { fprintf(stderr, "mode must be circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained\n"); return 2; }
+            if (found < 0) { fprintf(stderr, "mode must be circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium\n"); return 2; }
             setup_mode(found);
         }
-        else if (!strcmp(argv[i], "--w")) g_user_w = atoi(NEXTV());
-        else if (!strcmp(argv[i], "--h")) g_user_h = atoi(NEXTV());
+        else if (!strcmp(argv[i], "--w")) {
+            long value;
+            const char *v = NEXTV();
+            if (!parse_long_range(v, 1, INT_MAX, &value)) {
+                fprintf(stderr, "invalid value for --w: %s (expected a positive integer)\n", v);
+                return 2;
+            }
+            g_user_w = (int)value;
+        }
+        else if (!strcmp(argv[i], "--h")) {
+            long value;
+            const char *v = NEXTV();
+            if (!parse_long_range(v, 1, INT_MAX, &value)) {
+                fprintf(stderr, "invalid value for --h: %s (expected a positive integer)\n", v);
+                return 2;
+            }
+            g_user_h = (int)value;
+        }
         else if (!strcmp(argv[i], "--seed")) {
             const char *sv = NEXTV();
-            char *endp = NULL;
-            g_seed = strtoull(sv, &endp, 10);
-            if (!endp || *endp != '\0') { /* word seed: hash it */
-                uint64_t h = 1469598103934665603ULL;
-                for (const unsigned char *p = (const unsigned char *)sv; *p; p++) {
-                    h ^= *p;
-                    h *= 1099511628211ULL;
-                }
-                g_seed = h;
+            if (!parse_seed_value(sv, &g_seed)) {
+                fprintf(stderr, "invalid value for --seed: %s\n", sv);
+                return 2;
             }
+            g_seed_set = true;
         }
-        else if (!strcmp(argv[i], "--speed")) { g_speed = atol(NEXTV()); if (g_speed < 1) g_speed = 1; }
+        else if (!strcmp(argv[i], "--speed")) {
+            long value;
+            const char *v = NEXTV();
+            if (!parse_long_range(v, 1, MAX_SPEED, &value)) {
+                fprintf(stderr, "invalid value for --speed: %s (expected 1-%ld)\n", v, MAX_SPEED);
+                return 2;
+            }
+            g_speed = value;
+        }
         else if (!strcmp(argv[i], "--solver")) {
             const char *sv = NEXTV();
             if (!strcmp(sv, "thermo") || !strcmp(sv, "thermo=potts")) {
@@ -4325,6 +5109,16 @@ int main(int argc, char **argv) {
             else if (!strcmp(sv, "classic")) g_thermo = false;
             else { fprintf(stderr, "solver must be classic|thermo(=potts|=ising)\n"); return 2; }
         }
+        else if (!strcmp(argv[i], "--no-learn")) g_thermo_learn = false;
+        else if (!strcmp(argv[i], "--thermo-profile")) {
+            const char *profile = NEXTV();
+            if (!*profile || strlen(profile) >= sizeof g_thermo_profile) {
+                fprintf(stderr, "invalid value for --thermo-profile\n");
+                return 2;
+            }
+            snprintf(g_thermo_profile, sizeof g_thermo_profile, "%s", profile);
+        }
+        else if (!strcmp(argv[i], "--reset-learning")) g_thermo_reset_learning = true;
         else if (!strcmp(argv[i], "--once")) g_once = true;
         else if (!strcmp(argv[i], "--cycle")) g_cycle = true;
         else if (!strcmp(argv[i], "--zen")) g_zen = true;
@@ -4334,20 +5128,39 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-gfx")) g_no_gfx = true;
         else if (!strcmp(argv[i], "--link")) {
             char lk[128];
-            snprintf(lk, sizeof lk, "%s", NEXTV());
-            char *s2 = strstr(lk, "://");
-            char *modepart = strtok(s2 ? s2 + 3 : lk, "/");
-            char *seedpart = modepart ? strtok(NULL, "/") : NULL;
-            if (modepart && seedpart) {
-                for (int k = 0; k < NMODES; k++)
-                    if (!strcmp(modepart, MODES[k])) { setup_mode(k); break; }
-                g_seed = strtoull(seedpart, NULL, 10);
+            const char *link = NEXTV();
+            if (strlen(link) >= sizeof lk) {
+                fprintf(stderr, "invalid --link value: too long\n");
+                return 2;
             }
+            snprintf(lk, sizeof lk, "%s", link);
+            char *s2 = strstr(lk, "://");
+            char *modepart = s2 ? s2 + 3 : lk;
+            char *slash = strchr(modepart, '/');
+            uint64_t seed;
+            if (!slash || slash == modepart || !slash[1] || strchr(slash + 1, '/') ) {
+                fprintf(stderr, "invalid --link value: %s\n", link);
+                return 2;
+            }
+            *slash = '\0';
+            int mode = find_mode(modepart);
+            if (mode < 0 || !parse_u64_decimal(slash + 1, &seed)) {
+                fprintf(stderr, "invalid --link value: %s\n", link);
+                return 2;
+            }
+            setup_mode(mode);
+            g_seed = seed;
+            g_seed_set = true;
         }
         else if (!strcmp(argv[i], "--pan")) g_pan = true;
         else if (!strcmp(argv[i], "--theme")) {
-            g_theme = atoi(NEXTV());
-            if (g_theme < 0) g_theme = 0;
+            long value;
+            const char *v = NEXTV();
+            if (!parse_long_range(v, 0, 7, &value)) {
+                fprintf(stderr, "invalid value for --theme: %s (expected 0-7)\n", v);
+                return 2;
+            }
+            g_theme = (int)value;
         }
         else if (!strcmp(argv[i], "--list-modes")) {
             for (int k = 0; k < NMODES; k++) printf("%s\n", MODES[k]);
@@ -4361,20 +5174,30 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-weather")) g_no_weather = true;
         else if (!strcmp(argv[i], "--collage")) snprintf(g_collage_path, sizeof g_collage_path, "%s", NEXTV());
         else if (!strcmp(argv[i], "--daycycle")) g_daycycle = true;
-        else if (!strcmp(argv[i], "--zoom")) { g_zoom = atoi(NEXTV()); if (g_zoom < 1) g_zoom = 1; if (g_zoom > 6) g_zoom = 6; }
+        else if (!strcmp(argv[i], "--zoom")) {
+            long value;
+            const char *v = NEXTV();
+            if (!parse_long_range(v, 1, 6, &value)) {
+                fprintf(stderr, "invalid value for --zoom: %s (expected 1-6)\n", v);
+                return 2;
+            }
+            g_zoom = (int)value;
+        }
         else if (!strcmp(argv[i], "--save")) { snprintf(g_save_path, sizeof g_save_path, "%s", NEXTV()); g_save_auto = true; }
         else if (!strcmp(argv[i], "--gif")) { snprintf(g_gif_path, sizeof g_gif_path, "%s", NEXTV()); g_gif_on = 1; }
-        else if (!strcmp(argv[i], "--version")) { printf("wfc 5.1 \u2014 twenty-one worlds\n"); return 0; }
+        else if (!strcmp(argv[i], "--version")) { printf("wfc 5.2 \u2014 twenty-four worlds\n"); return 0; }
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             printf("wave function collapse, animated in your terminal\n\n"
-                   "  --mode circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained  tileset\n"
+                   "  --mode circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium  tileset\n"
                    "  --w N --h N                      grid cells (default: auto-fit window)\n"
                    "  --seed N|word                    rng seed (words are hashed)\n"
-                   "  --speed N                        collapse steps/sec (default 3500)\n"
+                   "  --speed N                        collapse steps/sec (default 1600)\n"
                    "  --save FILE.png|.bmp             auto-save map on completion\n"
-                   "  --solver classic|thermo         collapse engine (thermo = Extropic THRML)\n"
-                   "                   thermo needs python3 + pip install thrml, WFC_PYTHON=/path,\n"
-                   "                   and wfc_thermo.py beside wfc; falls back to classic\n"
+                   "  --solver classic|thermo         collapse engine (thermo = adaptive sidecar)\n"
+                   "  --no-learn                       disable persistent thermo preferences\n"
+                   "  --thermo-profile DIR             store thermo profiles in DIR\n"
+                   "  --reset-learning                clear the active thermo profile\n"
+                   "                   THRML is optional; bounded Python proposals remain available\n"
                    "  --gif FILE.gif                   record collapse animation\n"
                    "  --cycle                          auto-cycle modes forever (screensaver)\n"
                    "  --zen                            worlds dissolve into each other, never restarts\n"
@@ -4391,7 +5214,7 @@ int main(int argc, char **argv) {
                    "  --zoom N                         export/pixel scale 1-6\n"
                    "  --no-bloom                       disable glow post-processing\n"
                    "  --no-weather                     disable rain/snow/fireflies\n"
-                   "  --collage FILE.png               3x3 mosaic of all modes\n"
+                   "  --collage FILE.png               mosaic of all modes\n"
                    "  --daycycle                       terrain dawn/noon/dusk cycle\n"
                    "  --once                           exit after first map\n\n"
                    "keys: space new | m mode | y theme | c cycle | a audio | h help\n"
@@ -4403,18 +5226,28 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "unknown arg %s (try --help)\n", argv[i]); return 2; }
     }
 
-    if (g_gallery_path[0]) { run_gallery(g_gallery_path); return 0; }
+    if (g_nworlds > 1 && g_inf) {
+        fprintf(stderr, "--infinite cannot be combined with --twin or --quad\n");
+        return 2;
+    }
+    if (g_thermo && (g_nworlds > 1 || g_inf)) {
+        fprintf(stderr, "--solver thermo cannot be combined with --twin, --quad, or --infinite\n");
+        return 2;
+    }
+
+    if (g_gallery_path[0]) return run_gallery(g_gallery_path) ? 0 : 1;
     if (g_collage_path[0]) {
         int pw = 24, ph = 14;
         int pxs = pw * 8, pys = ph * 8;
-        int W3 = pxs * 7, H3 = pys * 3; /* 7x3 grid holds all twenty-one */
+        int collage_cols = 6, collage_rows = (NMODES + collage_cols - 1) / collage_cols;
+        int W3 = pxs * collage_cols, H3 = pys * collage_rows;
         uint8_t *big = calloc((size_t)W3 * H3, 3);
         if (!big) { perror("malloc"); return 1; }
         for (int mi = 0; mi < NMODES; mi++) {
             bool is_terrain = !strcmp(MODES[mi], "terrain");
             int art = is_terrain ? 16 : 8, f = 8 / (art / 8);
-            gallery_solve(mi, 42, pw, ph);
-            int px = (mi % 7) * pxs, py = (mi / 7) * pys;
+            (void)gallery_solve(mi, 42, pw, ph);
+            int px = (mi % collage_cols) * pxs, py = (mi / collage_cols) * pys;
             if (px + pxs > W3 || py + pys > H3) continue;
             for (int y = 0; y < pys; y++)
                 for (int x = 0; x < pxs; x++) {
@@ -4427,8 +5260,18 @@ int main(int argc, char **argv) {
         Buf img = png_bytes(big, W3, H3);
         free(big);
         FILE *fp = fopen(g_collage_path, "wb");
-        if (fp) { fwrite(img.b, 1, img.n, fp); fclose(fp); }
+        bool ok = false;
+        if (fp) {
+            bool wrote = fwrite(img.b, 1, img.n, fp) == img.n;
+            int close_rc = fclose(fp);
+            ok = wrote && close_rc == 0;
+        }
         buf_free(&img);
+        if (!ok) {
+            fprintf(stderr, "collage: failed to write %s: %s\n",
+                    g_collage_path, strerror(errno));
+            return 1;
+        }
         printf("collage: %s\n", g_collage_path);
         return 0;
     }
@@ -4455,10 +5298,16 @@ int main(int argc, char **argv) {
     }
 
     bool tty = isatty(STDOUT_FILENO);
-    if (g_seed == 0) g_seed = (uint64_t)time(NULL) * 2654435761u + getpid();
+    g_is_tty = tty;
+    if (!g_seed_set) g_seed = (uint64_t)time(NULL) * 2654435761u + (uint64_t)getpid();
     rs_ = g_seed ^ 0xD1B54A32D192ED03ULL;
     if (ntiles_ == 0) setup_mode(0);
     speed_changed();
+
+    if (!tty && (g_nworlds > 1 || g_inf)) {
+        fprintf(stderr, "--twin, --quad, and --infinite require an interactive terminal\n");
+        return 2;
+    }
 
     if (!tty) {
         if (g_user_w > 64) g_user_w = 64;
@@ -4518,7 +5367,11 @@ int main(int argc, char **argv) {
             if (g_gif_path[0]) snprintf(gp, sizeof gp, "%s", g_gif_path);
             else snprintf(gp, sizeof gp, "wfc-%s-%llu.gif", MODES[g_mode_idx],
                           (unsigned long long)(g_seed % 100000000ULL));
-            write_gif(gp);
+            if (!write_gif(gp)) {
+                frames_clear();
+                fprintf(stderr, "failed to save %s\n", gp);
+                return 1;
+            }
             frames_clear();
         }
         if (getenv("WFC_DEBUG")) {
@@ -4532,8 +5385,17 @@ int main(int argc, char **argv) {
             fprintf(stderr, "\nmoist:");
             for (int k = 0; k < 5; k++) fprintf(stderr, " %d:%.0f%%", k, 100.0 * em[k] / (W_ * H_));
             fprintf(stderr, "\n");
+            QualityMetrics qm = quality_measure(true);
+            double qr = quality_reward((QualityMetrics){0}, qm, W_ * H_, 0);
+            fprintf(stderr, "quality=%.3f validity=%.3f coverage=%.3f diversity=%.3f "
+                            "smoothness=%.3f topology=%.3f reward=%+.3f\n",
+                    qm.total, qm.validity, qm.coverage, qm.diversity,
+                    qm.smoothness, qm.topology, qr);
         }
-        if (g_save_path[0]) save_image(g_save_path);
+        if (g_save_path[0] && !save_image(g_save_path)) {
+            fprintf(stderr, "failed to save %s\n", g_save_path);
+            return 1;
+        }
         printf("OK mode=%s %dx%d seed=%llu tries=%d steps=%ld%s%s%s%s\n",
                MODES[g_mode_idx], W_, H_, (unsigned long long)g_seed, tries, total,
                g_save_path[0] ? " saved=" : "", g_save_path[0] ? g_save_path : "",
@@ -4698,13 +5560,17 @@ inf_continue:
                     if (g_gif_path[0]) snprintf(gp, sizeof gp, "%s", g_gif_path);
                     else snprintf(gp, sizeof gp, "wfc-%s-%llu.gif", MODES[g_mode_idx],
                                   (unsigned long long)(g_seed % 100000000ULL));
-                    write_gif(gp);
+                    bool gif_ok = write_gif(gp);
                     frames_clear();
-                    set_note("saved %s", gp);
+                    if (gif_ok) set_note("saved %s", gp);
+                    else set_note("gif failed: %s", gp);
                     msleep(600);
                 }
             }
-            if (g_save_auto && g_save_path[0]) { save_image(g_save_path); set_note("saved %s", g_save_path); }
+            if (g_save_auto && g_save_path[0]) {
+                if (save_image(g_save_path)) set_note("saved %s", g_save_path);
+                else set_note("save failed: %s", g_save_path);
+            }
             double t0 = now_ms();
             bool anim = !strcmp(MODES[g_mode_idx], "fire") || !strcmp(MODES[g_mode_idx], "waves")
                         || !strcmp(MODES[g_mode_idx], "galaxy") || !strcmp(MODES[g_mode_idx], "city") || !strcmp(MODES[g_mode_idx], "aurora");
@@ -4767,15 +5633,20 @@ inf_continue:
         if (g_gif_path[0]) snprintf(gp, sizeof gp, "%s", g_gif_path);
         else snprintf(gp, sizeof gp, "wfc-zen-%llu.gif",
                       (unsigned long long)(g_seed % 100000000ULL));
-        write_gif(gp);
-        printf("saved %s (%d frames)\n", gp, g_nframes);
+        int gif_frames = g_nframes;
+        if (write_gif(gp)) printf("saved %s (%d frames)\n", gp, gif_frames);
+        else fprintf(stderr, "failed to save %s\n", gp);
         frames_clear();
     }
     cfg_save();
-    free(dom_); free(stk_); free(fb_);
+    free_world_buffers();
+    free(fb_);
+    free(prev_sig_);
+    free(ghost_);
+    free(g_frames);
     free(river_); free(river_rank_); free(comp_); free(comp_col_);
     free(thermo_lbuf);
-    free(domB_); free(stkB_); free(domC_); free(stkC_); free(domD_); free(stkD_);
+    free(gif_kids);
     free(snap_);
     for (int i = 0; i < UNDO_N; i++) free(undo_[i]);
     hist_clear();

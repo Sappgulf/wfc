@@ -6,9 +6,11 @@ wfc: wfc.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
 
 # sanitizer build: ./wfc with ASan+UBSan reporting
-asan: wfc.c
+wfc_asan: wfc.c
 	$(CC) -O1 -g -std=c11 -Wall -Wextra -fsanitize=address,undefined \
 		-fno-omit-frame-pointer -o wfc_asan $< $(LDLIBS)
+
+asan: wfc_asan
 
 # pedantic warning sweep: must compile with zero output
 strict: wfc.c
@@ -25,6 +27,41 @@ test: wfc
 	done
 	@./wfc --collage /tmp/wfc_test_collage.png >/dev/null
 	@echo "$$(./wfc --list-modes | wc -l | tr -d ' ') modes + collage OK"
+
+regression: wfc
+	@set -e; \
+	a=$$(./wfc --mode fire --seed 0 --w 8 --h 6 --once); \
+	b=$$(./wfc --mode fire --seed 0 --w 8 --h 6 --once); \
+	test "$$a" = "$$b"; \
+	if ./wfc --w nope >/dev/null 2>/dev/null; then \
+		echo 'regression: invalid --w was accepted' >&2; exit 1; \
+	fi; \
+	if ./wfc --mode fire --w 8 --h 6 --once --save /tmp >/dev/null 2>/dev/null; then \
+		echo 'regression: failed save was reported as success' >&2; exit 1; \
+	fi; \
+	out=$$(mktemp -d /tmp/wfc-regression.XXXXXX); \
+	./wfc --mode fire --seed 9 --w 8 --h 6 --once --save "$$out/map.png" >/dev/null; \
+	test -s "$$out/map.png"; \
+	echo 'regression: seed, argument, and export contracts OK'
+
+python-check:
+	@python3 -m py_compile wfc_thermo.py
+	@echo 'python: syntax OK'
+
+protocol-check:
+	@python3 -m unittest tests.test_protocol_contract -v
+
+bridge-check: wfc
+	@python3 -m unittest tests.test_c_bridge -v
+
+learning-check:
+	@python3 -m unittest tests.test_wfc_learning -v
+	@echo "learning: profile/update contract OK"
+
+quality-check: wfc
+	@set -e; out=$$(WFC_DEBUG=1 ./wfc --mode circuit --seed 7 --w 8 --h 6 --once 2>&1 >/dev/null); \
+		echo "$$out" | grep -q 'quality='; \
+		echo "quality: deterministic metrics OK"
 
 fuzz: wfc_asan
 	@set -e; modes=$$(./wfc --list-modes); n=$$(echo "$$modes" | wc -l | tr -d ' '); \
@@ -50,4 +87,4 @@ clean:
 install: wfc
 	install -m 0755 wfc /usr/local/bin/wfc
 
-.PHONY: clean install asan strict debug test fuzz
+.PHONY: clean install asan strict debug test regression python-check protocol-check bridge-check learning-check quality-check fuzz

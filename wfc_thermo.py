@@ -1,13 +1,26 @@
 #!/usr/bin/env python3
 """wfc_thermo.py - wave function collapse as an energy-based model.
 
-Reads a JSON spec on stdin (written by wfc.c --solver thermo):
+The worker protocol reads JSONL commands on stdin (written by wfc.c
+--solver thermo):
     w, h, ntiles, seed, torus
     unary[ntiles]          per-tile log-weight (unary energy)
     cdir[4][ntiles]        per-direction bitmask of compatible b tiles
     domains[n]             per-cell uint64 allowed-tile masks (optional)
     steps, chains, beta0, beta_max
     form                   "potts" (default) | "ising" (domain-wall p-bits)
+
+The long-lived protocol is bidirectional:
+    init -> ready
+    sample -> stats, proposal | done
+    feedback -> learn
+    reset -> learn
+    finish -> done
+    stop -> exit
+
+The sampler is intentionally optional.  If THRML/JAX is installed, the
+one-shot compatibility API below remains available; the persistent worker
+uses a dependency-free Boltzmann proposal engine when that stack is absent.
 
 WFC is a pairwise Potts/EBM: cells are categorical nodes, cdir masks are
 pairwise compatibility energies, tile weights are unary biases. THRML
@@ -28,11 +41,37 @@ diagnostics go to stderr; stdout carries JSON lines only.
 """
 
 import json
+import math
+import os
+import random
+import re
 import signal
 import sys
 import time
 
+from wfc_learning import (
+    CONTEXT_COUNT,
+    load_profile,
+    new_state,
+    reset_state,
+    save_profile,
+    tile_fingerprint,
+    update_state,
+)
+
 _T0 = time.monotonic()
+
+MAX_TILES = 63  # C represents compatibility and domains as uint64_t masks.
+MAX_CELLS = 100_000
+MAX_DIM = 4096
+MAX_STEPS = 10_000
+MAX_CHAINS = 1_024
+MAX_EDGE_BYTES = 256 * 1024 * 1024
+MAX_CHAIN_STATES = 64 * 1024 * 1024
+MAX_SCAN_STATES = 64 * 1024 * 1024
+MAX_PROTOCOL_LINE = 8 * 1024 * 1024
+MAX_FEEDBACK_EVENTS = 512
+U64_MASK = (1 << 64) - 1
 
 
 def _fatal(why):
@@ -41,6 +80,7 @@ def _fatal(why):
     sys.exit(1)
 
 
+_RUNTIME_ERROR = None
 try:
     import numpy as np
     import jax
@@ -55,7 +95,7 @@ try:
     )
     from thrml.pgm import CategoricalNode
 except Exception as e:  # pragma: no cover - environment dependent
-    _fatal("missing thrml/jax (pip install thrml jax): %s" % e)
+    _RUNTIME_ERROR = e
 
 # if the C parent dies we must not die with a traceback mid-write
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
@@ -63,75 +103,147 @@ signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 INVALID = -1e10
 
 
+def require_runtime():
+    if _RUNTIME_ERROR is not None:
+        raise RuntimeError("missing thrml/jax (pip install thrml jax): %s" % _RUNTIME_ERROR)
+
+
+def jax_key(seed):
+    """Represent the full protocol seed with JAX's uint32 key primitives."""
+    seed &= U64_MASK
+    key = jax.random.key(seed & 0xFFFFFFFF)
+    return jax.random.fold_in(key, (seed >> 32) & 0xFFFFFFFF)
+
+
 def emit(v):
     sys.stdout.write(json.dumps(v) + "\n")
     sys.stdout.flush()
 
 
-def load_spec():
-    try:
-        spec = json.load(sys.stdin)
-    except Exception as e:
-        _fatal("bad json spec: %s" % e)
+def _read_protocol_line():
+    """Bound one JSONL frame before handing it to the JSON decoder."""
+    line = sys.stdin.readline(MAX_PROTOCOL_LINE + 1)
+    if len(line) > MAX_PROTOCOL_LINE:
+        raise ValueError("protocol line exceeds the supported limit of %d bytes" % MAX_PROTOCOL_LINE)
+    return line
+
+
+def validate_spec(spec):
+    """Normalize one init/legacy spec without importing numeric runtimes."""
     if not isinstance(spec, dict):
-        _fatal("spec must be a json object")
+        raise ValueError("spec must be a json object")
     for key in ("w", "h", "ntiles", "cdir", "unary"):
         if key not in spec:
-            _fatal("spec missing key: %s" % key)
-    try:
-        w, h, ntiles = int(spec["w"]), int(spec["h"]), int(spec["ntiles"])
-    except (TypeError, ValueError):
-        _fatal("w/h/ntiles must be integers")
+            raise ValueError("spec missing key: %s" % key)
+    if any(isinstance(spec[key], bool) or not isinstance(spec[key], int)
+           for key in ("w", "h", "ntiles")):
+        raise ValueError("w/h/ntiles must be integers")
+    w, h, ntiles = spec["w"], spec["h"], spec["ntiles"]
     if w < 1 or h < 1 or ntiles < 1:
-        _fatal("w/h/ntiles must be >= 1")
+        raise ValueError("w/h/ntiles must be >= 1")
+    if w > MAX_DIM or h > MAX_DIM:
+        raise ValueError("w/h exceed the supported limit of %d" % MAX_DIM)
+    if w > MAX_CELLS // h:
+        raise ValueError("grid exceeds the supported limit of %d cells" % MAX_CELLS)
+    if ntiles > MAX_TILES:
+        raise ValueError("ntiles exceeds the uint64 mask limit of %d" % MAX_TILES)
     spec["w"], spec["h"], spec["ntiles"] = w, h, ntiles
     n = w * h
+    if 2 * n * ntiles * ntiles > MAX_EDGE_BYTES // 4:
+        raise ValueError("compatibility matrix exceeds the supported memory budget")
     raw = spec["cdir"]
-    if not isinstance(raw, list) or len(raw) < 4:
-        _fatal("cdir must be a list of 4 rows")
+    if not isinstance(raw, list) or len(raw) != 4:
+        raise ValueError("cdir must be a list of exactly 4 rows")
     cdir_masks = []
+    mask_limit = (1 << ntiles) - 1
     for d in range(4):
         row = raw[d]
         if isinstance(row, dict):
             row = [row.get(str(i), 0) for i in range(ntiles)]
         elif isinstance(row, list):
             if len(row) != ntiles:
-                _fatal("cdir[%d] has wrong length" % d)
+                raise ValueError("cdir[%d] has wrong length" % d)
         else:
             row = [row] * ntiles
         try:
-            cdir_masks.append([int(v) & ((1 << ntiles) - 1) for v in row])
+            values = []
+            for v in row:
+                if isinstance(v, bool) or not isinstance(v, int) or v < 0 or v > mask_limit:
+                    raise ValueError
+                values.append(v)
+            cdir_masks.append(values)
         except (TypeError, ValueError):
-            _fatal("cdir[%d] not integers" % d)
+            raise ValueError("cdir[%d] not integers" % d)
     spec["cdir_masks"] = cdir_masks
     unary = spec["unary"]
     if not isinstance(unary, list) or len(unary) != ntiles:
-        _fatal("unary must have ntiles entries")
+        raise ValueError("unary must have ntiles entries")
     try:
-        unary = np.array([float(v) for v in unary], dtype=np.float64)
+        unary = [float(v) for v in unary]
     except (TypeError, ValueError):
-        _fatal("unary not numeric")
-    if not np.all(np.isfinite(unary)):
-        _fatal("unary has non-finite values")
-    spec["unary"] = unary.tolist()
+        raise ValueError("unary not numeric")
+    if not all(math.isfinite(value) for value in unary):
+        raise ValueError("unary has non-finite values")
+    spec["unary"] = unary
     dom = None
     if "domains" in spec:
-        if len(spec["domains"]) != n:
-            print("wfc_thermo: domains has wrong length, ignoring",
-                  file=sys.stderr)
-        else:
-            try:
-                dom = [int(v) & ((1 << ntiles) - 1) for v in spec["domains"]]
-            except (TypeError, ValueError):
-                _fatal("domains not integers")
-            for i, m in enumerate(dom):
-                if m == 0:
-                    _fatal("cell %d has an empty domain (contradicted)" % i)
+        if not isinstance(spec["domains"], list) or len(spec["domains"]) != n:
+            raise ValueError("domains must have exactly w*h entries")
+        try:
+            dom = []
+            for v in spec["domains"]:
+                if isinstance(v, bool) or not isinstance(v, int) or v < 0 or v > mask_limit:
+                    raise ValueError
+                dom.append(v)
+        except (TypeError, ValueError):
+            raise ValueError("domains not integers")
+        for i, m in enumerate(dom):
+            if m == 0:
+                raise ValueError("cell %d has an empty domain (contradicted)" % i)
     spec["domain"] = dom
-    spec["torus"] = bool(spec.get("torus", False))
-    spec["steps"] = max(1, int(spec.get("steps", 180) or 1))
-    spec["chains"] = max(1, int(spec.get("chains", 48) or 1))
+    torus = spec.get("torus", False)
+    if not isinstance(torus, bool):
+        raise ValueError("torus must be boolean")
+    spec["torus"] = torus
+    for key, default, upper in (("steps", 180, MAX_STEPS), ("chains", 48, MAX_CHAINS)):
+        value = spec.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1 or value > upper:
+            raise ValueError("%s must be an integer in the range 1..%d" % (key, upper))
+        spec[key] = value
+    if n > MAX_CHAIN_STATES // spec["chains"]:
+        raise ValueError("initial chain state exceeds the supported memory budget")
+    if n > MAX_SCAN_STATES // (spec["steps"] * spec["chains"]):
+        raise ValueError("anneal output exceeds the supported memory budget")
+    seed = spec.get("seed", 0)
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0 or seed >= (1 << 64):
+        raise ValueError("seed must be an unsigned 64-bit integer")
+    spec["seed"] = seed & U64_MASK
+    form = spec.get("form", "potts")
+    if form not in ("potts", "ising"):
+        raise ValueError("form must be potts or ising")
+    spec["form"] = form
+    mode = spec.get("mode", "default")
+    if not isinstance(mode, str) or len(mode) > 64:
+        raise ValueError("mode must be a short string")
+    spec["mode"] = mode
+    learn = spec.get("learn", True)
+    if not isinstance(learn, bool):
+        raise ValueError("learn must be boolean")
+    spec["learn"] = learn
+    profile_dir = spec.get("profile_dir")
+    if profile_dir is not None and (not isinstance(profile_dir, str) or len(profile_dir) > 4096):
+        raise ValueError("profile_dir must be a path string")
     return spec
+
+
+def load_spec():
+    try:
+        spec = json.load(sys.stdin)
+        return validate_spec(spec)
+    except SystemExit:
+        raise
+    except Exception as e:
+        _fatal("bad json spec: %s" % e)
 
 
 def build_edges(W_, H_, torus):
@@ -231,6 +343,7 @@ def _nearest_allowed(mask, band, ntiles):
 # ---------------- Potts solve (categorical nodes) ----------------
 
 def potts_solve(spec, emit_meta=True):
+    require_runtime()
     W_, H_, ntiles = spec["w"], spec["h"], spec["ntiles"]
     seed = spec["seed"]
     steps = spec["steps"]
@@ -279,7 +392,7 @@ def potts_solve(spec, emit_meta=True):
     U_basis = jnp.array(U, dtype=jnp.float32)
 
     init = np.zeros((chains, n), dtype=np.uint8)
-    rng_c = np.random.default_rng(seed + 31)
+    rng_c = np.random.default_rng((seed + 31) & U64_MASK)
     for c in range(chains):
         init[c] = [int(rng_c.choice(allowed_ids(i))) for i in range(n)]
     init = jnp.array(init)
@@ -310,7 +423,7 @@ def potts_solve(spec, emit_meta=True):
         _, outs = jax.lax.scan(step_batch, init, (keys, betas))
         return outs  # (steps, chains, n)
 
-    keys0 = jax.random.split(jax.random.key(seed), steps)
+    keys0 = jax.random.split(jax_key(seed), steps)
     # the domain-wall compile budget for THIS grid (validated per attempt:
     # thermometer spins = sum over cells of (allowed-states - 1))
     if domain is not None:
@@ -345,16 +458,16 @@ def potts_solve(spec, emit_meta=True):
     for retry in range(4 if ntiles <= 16 else 8):
         if time.monotonic() - _T0 > 120.0:
             break
-        seed2 = seed + 1000 * (retry + 1)
+        seed2 = (seed + 1000 * (retry + 1)) & U64_MASK
         pref = draw_preferences(unary, domain, ntiles, n,
-                                np.random.default_rng(seed2 + 555), W_, H_,
+                                np.random.default_rng((seed2 + 555) & U64_MASK), W_, H_,
                                 spec.get("smooth", False))
         U_basis = jnp.array(cell_unary(unary, domain, ntiles, n, pref), dtype=jnp.float32)
-        rng_c = np.random.default_rng(seed2 + 31)
+        rng_c = np.random.default_rng((seed2 + 31) & U64_MASK)
         nxt = np.zeros((chains, n), dtype=np.uint8)
         for c in range(chains):
             nxt[c] = [int(rng_c.choice(allowed_ids(i))) for i in range(n)]
-        cfgs2 = np.asarray(anneal(jnp.array(nxt), jax.random.split(jax.random.key(seed2), steps)))
+        cfgs2 = np.asarray(anneal(jnp.array(nxt), jax.random.split(jax_key(seed2), steps)))
         for si in range(0, cfgs2.shape[0], 2):
             for c in range(cfgs2.shape[1]):
                 cfg = cfgs2[si, c]
@@ -461,15 +574,493 @@ def ising_solve(spec):
     potts_solve(spec, emit_meta=False)
 
 
+def _safe_profile_name(mode):
+    """Keep user-visible mode names from becoming path components."""
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(mode)).strip("._")
+    return name or "default"
+
+
+def _domain_values(raw, n, ntiles):
+    """Validate a protocol domain vector without depending on NumPy."""
+    if not isinstance(raw, list) or len(raw) != n:
+        raise ValueError("domains must have exactly w*h entries")
+    limit = (1 << ntiles) - 1
+    values = []
+    for i, value in enumerate(raw):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0 or value > limit:
+            raise ValueError("domain %d is empty or outside the tile mask" % i)
+        values.append(value)
+    return values
+
+
+def _singleton_tile(mask):
+    if mask <= 0 or mask & (mask - 1):
+        return -1
+    return mask.bit_length() - 1
+
+
+class ThermoSession:
+    """Long-lived, C-controlled thermodynamic proposal session.
+
+    The C side owns hard domains and propagation.  This object only proposes
+    soft assignments and updates bounded preferences from C's measured reward.
+    Keeping those responsibilities separate makes a rejected proposal cheap:
+    the C transaction rolls back while the learner receives the result.
+    """
+
+    def __init__(self):
+        self.spec = None
+        self.edges = []
+        self.state = None
+        self.learn = False
+        self.profile_path = None
+        self.rng = random.Random(0)
+        self.round = 0
+        self.beta_scale = 1.0
+        self.pending = None
+        self.sampler = "python"
+
+    def _identity(self, spec):
+        mode = spec.get("mode", "default")
+        tiles = [{"index": i, "weight": spec["unary"][i]}
+                 for i in range(spec["ntiles"])]
+        fingerprint = tile_fingerprint(mode, tiles, spec["cdir_masks"])
+        pair_count = 4 * spec["ntiles"] * spec["ntiles"]
+        profile_dir = (spec.get("profile_dir") or
+                       os.environ.get("WFC_THERMO_PROFILE") or
+                       os.path.expanduser("~/.wfc-thermo"))
+        profile_name = "%s-%s.json" % (_safe_profile_name(mode), fingerprint)
+        self.profile_path = os.path.join(profile_dir, profile_name)
+        return mode, fingerprint, pair_count
+
+    def init(self, command):
+        if command.get("v") != 1:
+            raise ValueError("unsupported protocol version")
+        spec = validate_spec(dict(command))
+        self.spec = spec
+        self.edges = build_edges(spec["w"], spec["h"], spec["torus"])
+        mode, fingerprint, pair_count = self._identity(spec)
+        self.learn = bool(spec.get("learn", True))
+        if self.learn:
+            self.state = load_profile(
+                self.profile_path,
+                mode,
+                fingerprint,
+                spec["ntiles"],
+                pair_count,
+                CONTEXT_COUNT,
+            )
+        else:
+            self.state = new_state(spec["ntiles"], pair_count, CONTEXT_COUNT)
+            self.state["mode"] = mode
+            self.state["fingerprint"] = fingerprint
+        self.rng = random.Random((spec["seed"] ^ 0x9E3779B97F4A7C15) & U64_MASK)
+        self.round = 0
+        self.beta_scale = 1.0
+        self.pending = None
+        self.sampler = "thrml" if _RUNTIME_ERROR is None else "python"
+        domain = spec.get("domain")
+        pbits = (sum(mask.bit_count() - 1 for mask in domain)
+                 if domain is not None else spec["w"] * spec["h"] * (spec["ntiles"] - 1))
+        emit({
+            "v": 1,
+            "t": "ready",
+            "schema": 1,
+            "sampler": self.sampler,
+            "observations": self.state["observations"],
+            "pbits": int(pbits),
+        })
+
+    def _neighbors(self, index):
+        w, h = self.spec["w"], self.spec["h"]
+        x, y = index % w, index // w
+        for direction in range(4):
+            nx, ny = x, y
+            if direction == 0:
+                if h == 1:
+                    continue
+                ny = (y - 1) % h if self.spec["torus"] else y - 1
+            elif direction == 1:
+                if w == 1:
+                    continue
+                nx = (x + 1) % w if self.spec["torus"] else x + 1
+            elif direction == 2:
+                if h == 1:
+                    continue
+                ny = (y + 1) % h if self.spec["torus"] else y + 1
+            else:
+                if w == 1:
+                    continue
+                nx = (x - 1) % w if self.spec["torus"] else x - 1
+            if 0 <= nx < w and 0 <= ny < h:
+                yield ny * w + nx, direction
+
+    def _context_index(self, domains, index):
+        neighbors = list(self._neighbors(index))
+        boundary = len(neighbors) < 4
+        unresolved = sum(_singleton_tile(domains[n]) < 0 for n, _ in neighbors)
+        return min(CONTEXT_COUNT - 1, (4 if boundary else 0) + min(3, unresolved))
+
+    def _pair_index(self, direction, source, target):
+        ntiles = self.spec["ntiles"]
+        return (direction * ntiles + source) * ntiles + target
+
+    def _pair_term(self, direction, source, neighbor_mask):
+        compatible = self.spec["cdir_masks"][direction][source] & neighbor_mask
+        if not compatible:
+            return None
+        total = 0.0
+        count = 0
+        while compatible:
+            bit = compatible & -compatible
+            target = bit.bit_length() - 1
+            total += self.state["pair_bias"][self._pair_index(direction, source, target)]
+            count += 1
+            compatible ^= bit
+        return total / max(1, count)
+
+    def _candidate_options(self, domains, index):
+        ntiles = self.spec["ntiles"]
+        context = self._context_index(domains, index)
+        options = []
+        for tile in range(ntiles):
+            if not domains[index] & (1 << tile):
+                continue
+            pair_score = 0.0
+            support = 0
+            safe = True
+            for neighbor, direction in self._neighbors(index):
+                term = self._pair_term(direction, tile, domains[neighbor])
+                if term is None:
+                    safe = False
+                    break
+                pair_score += term
+                support += (self.spec["cdir_masks"][direction][tile] & domains[neighbor]).bit_count()
+            if not safe:
+                continue
+            weight = max(float(self.spec["unary"][tile]), 1e-9)
+            score = (math.log(weight) + self.state["tile_bias"][tile] +
+                     0.34 * pair_score + 0.18 * self.state["context_bias"][context] +
+                     0.035 * math.log1p(support))
+            options.append((tile, score, context))
+        return options
+
+    def _choice(self, options, beta):
+        if not options:
+            return None, 0.0
+        scaled = [max(-60.0, min(60.0, beta * item[1])) for item in options]
+        peak = max(scaled)
+        weights = [math.exp(value - peak) for value in scaled]
+        total = sum(weights)
+        pick = self.rng.random() * total
+        for item, weight in zip(options, weights):
+            pick -= weight
+            if pick <= 0.0:
+                return item, weight / total
+        return options[-1], weights[-1] / total
+
+    def _partial_bad(self, domains):
+        bad = 0
+        for source, target, direction in self.edges:
+            a = _singleton_tile(domains[source])
+            b = _singleton_tile(domains[target])
+            if a >= 0 and b >= 0 and not (self.spec["cdir_masks"][direction][a] & (1 << b)):
+                bad += 1
+        return bad
+
+    def _complete_config(self, domains):
+        cfg = [_singleton_tile(mask) for mask in domains]
+        if any(tile < 0 for tile in cfg):
+            return cfg, -1
+        bad = 0
+        for source, target, direction in self.edges:
+            if not (self.spec["cdir_masks"][direction][cfg[source]] & (1 << cfg[target])):
+                bad += 1
+        return cfg, bad
+
+    def _energy(self, domains):
+        cfg, _ = self._complete_config(domains)
+        energy = 0.0
+        for index, tile in enumerate(cfg):
+            if tile >= 0:
+                energy += math.log(max(float(self.spec["unary"][tile]), 1e-9))
+        for source, target, direction in self.edges:
+            a, b = cfg[source], cfg[target]
+            if a >= 0 and b >= 0:
+                energy += 1.0 if self.spec["cdir_masks"][direction][a] & (1 << b) else -5.0
+        return energy
+
+    def _proposal(self, domains, budget, beta):
+        unresolved = [i for i, mask in enumerate(domains) if _singleton_tile(mask) < 0]
+        if not unresolved:
+            return None
+        # WFC's minimum-entropy ordering remains the strongest structural
+        # heuristic; the thermal draw only chooses among the best frontier.
+        ranked = sorted(
+            unresolved,
+            key=lambda i: (domains[i].bit_count(),
+                           -sum(_singleton_tile(nmask) >= 0
+                                for n, _ in self._neighbors(i)
+                                for nmask in (domains[n],)), i),
+        )
+        scan = min(len(ranked), max(1, budget))
+        candidates = []
+        for index in ranked[:scan]:
+            options = self._candidate_options(domains, index)
+            if options:
+                candidates.append((index, options))
+        if not candidates:
+            for index in ranked[scan:]:
+                options = self._candidate_options(domains, index)
+                if options:
+                    candidates.append((index, options))
+                    break
+        if not candidates:
+            return None
+        # Prefer the most constrained candidate but retain a small thermal
+        # chance of exploring the next frontier cell.
+        cell_weights = [math.exp(-0.45 * (len(options) - 1)) for _, options in candidates]
+        total = sum(cell_weights)
+        pick = self.rng.random() * total
+        chosen_index, chosen_options = candidates[-1]
+        for item, weight in zip(candidates, cell_weights):
+            pick -= weight
+            if pick <= 0.0:
+                chosen_index, chosen_options = item
+                break
+        choice, confidence = self._choice(chosen_options, beta)
+        if choice is None:
+            return None
+        tile, score, context = choice
+        return {
+            "i": chosen_index,
+            "tile": tile,
+            "p": round(float(confidence), 6),
+            "score": round(float(score), 6),
+            "context": context,
+        }
+
+    def _save(self):
+        if self.learn and self.profile_path:
+            save_profile(
+                self.profile_path,
+                self.state["mode"],
+                self.state["fingerprint"],
+                self.state,
+            )
+
+    @staticmethod
+    def _feedback_events(command, key):
+        events = command.get(key, [])
+        if events is None:
+            return []
+        if not isinstance(events, list) or len(events) > MAX_FEEDBACK_EVENTS:
+            raise ValueError("%s must contain at most %d events" % (key, MAX_FEEDBACK_EVENTS))
+        return events
+
+    def _done(self, domains):
+        cfg, bad = self._complete_config(domains)
+        if bad < 0:
+            return False
+        valid = int(bad == 0)
+        emit({
+            "v": 1,
+            "t": "done",
+            "valid": valid,
+            "bad": int(bad),
+            "quality": 1.0 if valid else max(0.0, 1.0 - 0.05 * bad),
+            "cfg": cfg,
+            "form": self.spec["form"],
+            "sampler": self.sampler,
+        })
+        return True
+
+    def sample(self, command):
+        if self.spec is None:
+            raise ValueError("sample received before init")
+        domains = _domain_values(command.get("domains"),
+                                 self.spec["w"] * self.spec["h"],
+                                 self.spec["ntiles"])
+        if self._done(domains):
+            return
+        raw_budget = command.get("budget", 12)
+        if isinstance(raw_budget, bool) or not isinstance(raw_budget, int) or raw_budget < 1:
+            raise ValueError("budget must be a positive integer")
+        budget = min(raw_budget, 256)
+        raw_beta = command.get("beta_target", 2.0)
+        beta_target = float(raw_beta)
+        if not math.isfinite(beta_target) or beta_target <= 0.0:
+            raise ValueError("beta_target must be positive and finite")
+        beta = max(0.05, min(24.0, beta_target * self.beta_scale))
+        self.round += 1
+        proposal = self._proposal(domains, budget, beta)
+        if proposal is None:
+            raise ValueError("no locally safe proposal; classic solver should take over")
+        bad = self._partial_bad(domains)
+        emit({
+            "v": 1,
+            "t": "stats",
+            "round": self.round,
+            "beta": round(beta, 6),
+            "energy": round(self._energy(domains), 6),
+            "bad": bad,
+            "confidence": proposal["p"],
+            "reward": self.state["quality_history"][-1] if self.state["quality_history"] else 0.0,
+            "observations": self.state["observations"],
+            "sampler": self.sampler,
+        })
+        self.pending = proposal
+        emit({
+            "v": 1,
+            "t": "proposal",
+            "round": self.round,
+            "patch": [proposal],
+            "beta": round(beta, 6),
+            "energy": round(self._energy(domains), 6),
+            "bad": bad,
+        })
+
+    def feedback(self, command):
+        if self.spec is None:
+            raise ValueError("feedback received before init")
+        reward = float(command.get("reward", 0.0))
+        if not math.isfinite(reward):
+            raise ValueError("feedback reward is not finite")
+        accepted = int(command.get("accepted", 0))
+        rejected = int(command.get("rejected", 0))
+        contradictions = int(command.get("contradictions", 0))
+        if contradictions > 0 or rejected > accepted:
+            self.beta_scale = max(0.72, self.beta_scale * 0.94)
+        elif accepted > 0 and reward >= 0.0:
+            self.beta_scale = min(1.35, self.beta_scale * 1.018)
+        if self.learn:
+            update_state(
+                self.state,
+                reward,
+                self._feedback_events(command, "tile_events"),
+                self._feedback_events(command, "pair_events"),
+                self._feedback_events(command, "context_events"),
+            )
+            self._save()
+        emit({
+            "v": 1,
+            "t": "learn",
+            "observations": self.state["observations"],
+            "baseline": round(self.state["baseline"], 6),
+            "tile_bias": [round(float(value), 6) for value in self.state["tile_bias"]],
+            "pair_bias": [round(float(value), 6) for value in self.state["pair_bias"]],
+            "context_bias": [round(float(value), 6) for value in self.state["context_bias"]],
+            "beta_scale": round(self.beta_scale, 6),
+        })
+        self.pending = None
+
+    def reset(self):
+        if self.state is None:
+            raise ValueError("reset received before init")
+        self.state = reset_state(self.state)
+        self.beta_scale = 1.0
+        self.pending = None
+        self._save()
+        emit({
+            "v": 1,
+            "t": "learn",
+            "observations": 0,
+            "baseline": 0.0,
+            "tile_bias": list(self.state["tile_bias"]),
+            "pair_bias": list(self.state["pair_bias"]),
+            "context_bias": list(self.state["context_bias"]),
+            "beta_scale": 1.0,
+            "reset": True,
+        })
+
+    def finish(self, command):
+        if self.spec is None:
+            raise ValueError("finish received before init")
+        raw = command.get("domains")
+        if raw is not None:
+            domains = _domain_values(raw, self.spec["w"] * self.spec["h"], self.spec["ntiles"])
+        else:
+            cfg = command.get("cfg", command.get("assignments"))
+            if not isinstance(cfg, list) or len(cfg) != self.spec["w"] * self.spec["h"]:
+                raise ValueError("finish needs domains or a complete cfg")
+            domains = []
+            for tile in cfg:
+                if isinstance(tile, bool) or not isinstance(tile, int) or tile < 0 or tile >= self.spec["ntiles"]:
+                    raise ValueError("finish cfg contains an invalid tile")
+                domains.append(1 << tile)
+        self._done(domains)
+
+
+def run_worker(first_command=None):
+    session = ThermoSession()
+    def handle(command):
+        if not isinstance(command, dict):
+            raise ValueError("command must be an object")
+        kind = command.get("t")
+        if kind == "init":
+            session.init(command)
+        elif kind == "sample":
+            session.sample(command)
+        elif kind == "feedback":
+            session.feedback(command)
+        elif kind == "reset":
+            session.reset()
+        elif kind == "finish":
+            session.finish(command)
+        elif kind == "stop":
+            return True
+        else:
+            raise ValueError("unknown command")
+        return False
+
+    lines = []
+    if first_command is not None:
+        lines.append(first_command)
+    for first in lines:
+        try:
+            command = json.loads(first) if isinstance(first, str) else first
+            if handle(command):
+                return 0
+        except BrokenPipeError:
+            return 1
+        except Exception as error:  # noqa: BLE001 - one JSON error at the process boundary
+            emit({"v": 1, "t": "fatal", "why": str(error)})
+            return 1
+    while True:
+        try:
+            line = _read_protocol_line()
+            if not line:
+                break
+            command = json.loads(line)
+            if handle(command):
+                return 0
+        except BrokenPipeError:
+            return 1
+        except Exception as error:  # noqa: BLE001 - one JSON error at the process boundary
+            emit({"v": 1, "t": "fatal", "why": str(error)})
+            return 1
+    return 0
+
+
 def main():
     try:
-        spec = load_spec()
+        first_line = _read_protocol_line()
+        if not first_line:
+            _fatal("missing json spec")
+        try:
+            first = json.loads(first_line)
+        except Exception as e:
+            _fatal("bad json spec: %s" % e)
+        if isinstance(first, dict) and first.get("t") == "init":
+            return run_worker(first)
+        spec = validate_spec(first)
         if spec.get("form", "potts") == "ising":
             ising_solve(spec)
         else:
             potts_solve(spec)
+        return 0
     except BrokenPipeError:
-        sys.exit(1)
+        return 1
     except SystemExit:
         raise
     except BaseException as e:  # noqa: BLE001 - the C parent needs one JSON line
@@ -480,8 +1071,8 @@ def main():
             emit({"t": "fatal", "why": "%s: %s" % (type(e).__name__, e)})
         except Exception:
             pass
-        sys.exit(1)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
