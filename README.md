@@ -183,12 +183,19 @@ stays bit-reproducible. Without the guard, legal-but-bland proposals displaced
 better classic picks and `--solver thermo` finished *below* `--solver classic`
 on most network worlds.
 
+The guard's verdict is also the learning signal. C reports the *margin* — how
+far the sidecar's own result landed above or below the classic tiles — along
+with the metrics of the sidecar's proposal rather than whichever result was
+kept, so the learner sees the consequence of its own move.
+
 Each feedback frame carries the complete mode-aware quality
 vector, a weighted metric delta, and the active per-tile quality prior; the
 learner records bounded metric and objective history in addition to tile,
 compatible-pair, and boundary-context preferences. Everything is bounded,
 fingerprinted per mode, and atomically persisted in `~/.wfc-thermo` (or
-`--thermo-profile DIR`). `--no-learn` keeps a run ephemeral. The worker
+`--thermo-profile DIR`). `--no-learn` keeps a run ephemeral. Over 30 runs on streets at 24x14, learning
+takes the displacement rate from 25.2% to 24.3% and quality from 0.9720 to
+0.9729, against a flat 26.5% / 0.969 for the `--no-learn` control. The worker
 validates dimensions, masks, domains, objectives, metrics, and sampling budgets
 before sampling; malformed requests emit a structured `fatal` line and the C
 parent falls back to the classic solver.

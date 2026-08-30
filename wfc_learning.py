@@ -89,11 +89,19 @@ def _event_index(item, values, label):
 
 
 def _apply_events(values, events, delta, learning_rate, decay, label):
+    """Decay is applied per visit, not per update.
+
+    A round touches one cell, so it reports a handful of features out of
+    hundreds. Decaying every bias on every update meant an untouched feature
+    lost ~80% of its value per run (0.995 ** ~325 steps) while a touched one
+    gained learning_rate * delta — nothing could ever accumulate, and the
+    learner sat at a flat displacement rate no matter how long it ran.
+    """
     for item in events or []:
         index = _event_index(item, values, label)
         feature = _clamp(_finite(item.get("value", 1.0), "%s event value" % label), -1.0, 1.0)
         values[index] = _clamp(
-            values[index] + learning_rate * delta * feature,
+            values[index] * decay + learning_rate * delta * feature,
             -BIAS_LIMIT,
             BIAS_LIMIT,
         )
@@ -251,14 +259,13 @@ def update_state(state, reward, tile_events, pair_events, context_events,
     reward = _clamp(reward, -1.0, 1.0)
     signal = objective_signal(reward, normalized_delta, objective_weights)
     delta = _clamp(signal - state["baseline"], -1.0, 1.0)
+    # A fast baseline swallows the signal: at 0.05 it tracked the reward
+    # within ~20 rounds, so `delta` sat at zero for the rest of the run.
     state["baseline"] = _clamp(
-        state["baseline"] * 0.95 + signal * 0.05,
+        state["baseline"] * 0.99 + signal * 0.01,
         -1.0,
         1.0,
     )
-    for values in (state["tile_bias"], state["pair_bias"], state["context_bias"]):
-        for index, value in enumerate(values):
-            values[index] = _clamp(value * decay, -BIAS_LIMIT, BIAS_LIMIT)
     _apply_events(state["tile_bias"], tile_events, delta, learning_rate, decay, "tile")
     _apply_events(state["pair_bias"], pair_events, delta, learning_rate, decay, "pair")
     _apply_events(state["context_bias"], context_events, delta, learning_rate, decay, "context")

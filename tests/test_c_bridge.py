@@ -73,6 +73,41 @@ class CBridgeTests(unittest.TestCase):
         self.assertEqual(reports[0]["quality"], reports[1]["quality"])
         self.assertEqual(reports[0]["thermo"], reports[1]["thermo"])
 
+    def test_feedback_marks_feature_presence_and_carries_the_guard_margin(self):
+        """Events say which features were used; the reward says if that was good.
+
+        Signing the events by acceptance as well made the two negatives cancel,
+        so a displaced proposal raised the bias of the tile that had just lost.
+        Every bias then drifted up together, and a uniform shift is invisible
+        to the worker's softmax — which is why learning did nothing at all.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "feedback.jsonl"
+            env = os.environ.copy()
+            env["WFC_THERMO_PY"] = os.fspath(FAKE_WORKER)
+            env["FAKE_FEEDBACK_LOG"] = os.fspath(log)
+            result = subprocess.run(
+                [os.fspath(BINARY), "--mode", "circuit", "--solver", "thermo",
+                 "--once", "--w", "8", "--h", "6", "--seed", "7"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            frames = [json.loads(line)
+                      for line in log.read_text(encoding="utf-8").splitlines()]
+
+        self.assertGreater(len(frames), 0)
+        displaced = [f for f in frames if f["rejected"] and not f["contradictions"]]
+        self.assertGreater(len(displaced), 0, "guard never displaced a proposal")
+        for frame in frames:
+            self.assertIn("margin", frame)
+            for key in ("tile_events", "pair_events", "context_events"):
+                for event in frame[key]:
+                    self.assertEqual(event["value"], 1,
+                                     "%s must mark presence, not outcome" % key)
+        # a displaced round must reach the learner as a loss
+        self.assertTrue(all(f["margin"] < 0 for f in displaced))
+        self.assertTrue(all(f["reward"] < 0 for f in displaced))
+
     def test_real_worker_persists_and_no_learn_is_ephemeral(self):
         with tempfile.TemporaryDirectory() as profile_dir:
             result = self.run_wfc(REAL_WORKER, profile_dir=profile_dir)

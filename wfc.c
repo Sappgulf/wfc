@@ -5178,26 +5178,36 @@ static int thermo_context_index(int cell) {
     return result > 7 ? 7 : result;
 }
 
+/* `margin` is the guard's verdict: how far the sidecar's own result landed
+ * above (or below) the tiles the classic heuristic would have placed. It is
+ * the one number that tells the learner whether the proposal was actually
+ * worth taking, so it is folded into the reward. Zero when no guard ran. */
 static bool thermo_send_feedback(const int *cells, const int *tiles, int count,
                                  int accepted, int rejected, int contradictions,
-                                 QualityMetrics before, QualityMetrics after) {
+                                 QualityMetrics before, QualityMetrics after,
+                                 double margin) {
     if (!thermo_in_) return false;
     double reward = quality_reward(before, after, accepted, rejected);
+    reward = quality_signed_clamp(reward + 6.0 * margin);
     QualityProfile profile = quality_profile();
     thermo_quality_ = after.total;
     fprintf(thermo_in_, "{\"v\":1,\"t\":\"feedback\",\"reward\":%.9g,"
                      "\"quality\":%.9g,\"accepted\":%d,\"rejected\":%d,"
-                     "\"contradictions\":%d,\"quality_focus\":",
-            reward, after.total, accepted, rejected, contradictions);
+                     "\"contradictions\":%d,\"margin\":%.9g,\"quality_focus\":",
+            reward, after.total, accepted, rejected, contradictions, margin);
     thermo_json_string(thermo_in_, profile.focus);
     fputs(",\"metrics\":", thermo_in_);
     quality_json(thermo_in_, after);
     fputs(",\"metrics_delta\":", thermo_in_);
     quality_delta_json(thermo_in_, before, after);
+    /* Events mark which features this round used; the reward carries whether
+     * that was a good idea. Signing the feature by acceptance too made the two
+     * negatives cancel — a displaced proposal *raised* the bias of the tile
+     * that lost, so every bias drifted up together and a uniform shift is
+     * invisible to the softmax. Presence only. */
     fputs(",\"tile_events\":[", thermo_in_);
     for (int i = 0; i < count; i++)
-        fprintf(thermo_in_, "%s{\"index\":%d,\"value\":%.3g}",
-                i ? "," : "", tiles[i], accepted ? 1.0 : -1.0);
+        fprintf(thermo_in_, "%s{\"index\":%d,\"value\":1}", i ? "," : "", tiles[i]);
     fputs("],\"pair_events\":[", thermo_in_);
     bool first = true;
     for (int i = 0; i < count; i++) {
@@ -5214,15 +5224,15 @@ static bool thermo_send_feedback(const int *cells, const int *tiles, int count,
             int nt = __builtin_ctzll(dom_[n]);
             int pair = (d * ntiles_ + tiles[i]) * ntiles_ + nt;
             bool compatible = (cdir_[d][tiles[i]] >> nt) & 1ULL;
-            fprintf(thermo_in_, "%s{\"index\":%d,\"value\":%.3g}",
-                    first ? "" : ",", pair, accepted && compatible ? 1.0 : -1.0);
+            if (!compatible) continue;   /* hard constraint, not a preference */
+            fprintf(thermo_in_, "%s{\"index\":%d,\"value\":1}", first ? "" : ",", pair);
             first = false;
         }
     }
     fputs("],\"context_events\":[", thermo_in_);
     for (int i = 0; i < count; i++)
-        fprintf(thermo_in_, "%s{\"index\":%d,\"value\":%.3g}",
-                i ? "," : "", thermo_context_index(cells[i]), accepted ? 1.0 : -1.0);
+        fprintf(thermo_in_, "%s{\"index\":%d,\"value\":1}",
+                i ? "," : "", thermo_context_index(cells[i]));
     fprintf(thermo_in_, "],\"final\":%s}\n", g_decided == W_ * H_ ? "true" : "false");
     if (fflush(thermo_in_) != 0 || ferror(thermo_in_)) return false;
     thermo_waiting_feedback_ = true;
@@ -5270,6 +5280,8 @@ static bool thermo_apply_patch(const char *s) {
     int contradictions = ok ? 0 : 1;
     if (!ok) memcpy(dom_, thermo_snap_, sizeof(uint64_t) * cells_n);
     QualityMetrics after = ok ? quality_measure(false) : before;
+    double margin = 0.0;
+    bool kept_baseline = false;
     if (ok) {
         /* counterfactual guard: keep the sidecar's assignment only when it
          * beats the tiles the classic heuristic would have laid in the same
@@ -5300,14 +5312,15 @@ static bool thermo_apply_patch(const char *s) {
         }
         QualityMetrics base = base_ok ? quality_measure(false) : before;
         rs_ = saved_rs;
+        margin = base_ok ? quality_objective(after) - quality_objective(base) : 0.0;
         /* ties go to the sidecar, so learning keeps receiving signal */
-        if (!base_ok || quality_objective(after) >= quality_objective(base)) {
+        if (margin >= 0.0) {
             memcpy(dom_, thermo_try_, sizeof(uint64_t) * cells_n);
         } else {
-            after = base;
             accepted = 0;
             rejected = count;
             thermo_displaced_ += count;
+            kept_baseline = true;
         }
     }
     thermo_round_++;
@@ -5317,9 +5330,27 @@ static bool thermo_apply_patch(const char *s) {
     thermo_contradictions_ += contradictions;
     g_decided = 0;
     for (size_t i = 0; i < cells_n; i++) if (pc64(dom_[i]) == 1) g_decided++;
-    quality_record(after);
-    return thermo_send_feedback(cells, tiles, count, accepted, rejected,
-                                contradictions, before, after);
+    /* the live trace follows the grid, which is the baseline when displaced */
+    quality_record(kept_baseline ? quality_measure(false) : after);
+    /* The learner has to see the consequence of *its* proposal. When the guard
+     * kept the classic result, dom_ holds the baseline, so its metrics and its
+     * neighbour tiles would be reported as the sidecar's own outcome. Build the
+     * frame against the sidecar's state and put the winner back afterwards. */
+    bool sent;
+    if (kept_baseline) {
+        uint64_t *winner = malloc(sizeof(uint64_t) * cells_n);
+        if (!winner) return false;
+        memcpy(winner, dom_, sizeof(uint64_t) * cells_n);
+        memcpy(dom_, thermo_try_, sizeof(uint64_t) * cells_n);
+        sent = thermo_send_feedback(cells, tiles, count, accepted, rejected,
+                                    contradictions, before, after, margin);
+        memcpy(dom_, winner, sizeof(uint64_t) * cells_n);
+        free(winner);
+    } else {
+        sent = thermo_send_feedback(cells, tiles, count, accepted, rejected,
+                                    contradictions, before, after, margin);
+    }
+    return sent;
 }
 
 static bool thermo_apply_cfg(const char *s) {

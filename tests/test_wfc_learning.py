@@ -41,14 +41,26 @@ class LearnerTests(unittest.TestCase):
         self.assertLess(state["baseline"], 0.0)
         self.assertEqual(state["observations"], 1)
 
-    def test_biases_are_clamped_and_decay_is_applied(self):
-        state = new_state(1, 1)
+    def test_biases_are_clamped_and_decay_applies_on_visit(self):
+        """Decay is per visit, so an unreported feature holds its value.
+
+        A round reports one cell out of hundreds of features. Decaying every
+        bias on every update erased far more than the reported features could
+        ever accumulate, so nothing was learned however long the run went.
+        """
+        state = new_state(2, 1)
         for _ in range(200):
             update_state(state, 1.0, [{"index": 0, "value": 100.0}], [], [])
         self.assertLessEqual(state["tile_bias"][0], 2.5)
-        state["tile_bias"][0] = 2.5
-        update_state(state, 0.0, [], [], [], decay=0.5)
-        self.assertLess(state["tile_bias"][0], 2.5)
+        self.assertGreater(state["tile_bias"][0], 0.0)
+        self.assertEqual(state["tile_bias"][1], 0.0, "unvisited bias must not move")
+
+        # a visited feature decays toward zero once the reward stops backing it
+        state["tile_bias"][0] = 2.0
+        state["tile_bias"][1] = 2.0
+        update_state(state, 0.0, [{"index": 0, "value": 0.0}], [], [], decay=0.5)
+        self.assertAlmostEqual(state["tile_bias"][0], 1.0)
+        self.assertAlmostEqual(state["tile_bias"][1], 2.0)
 
     def test_profile_fingerprint_mismatch_returns_fresh_state(self):
         path = self.tmp_path / "profile.json"

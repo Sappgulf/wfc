@@ -106,6 +106,11 @@ class FakeSession:
         reward = float(command.get("reward", 0.0))
         if not math.isfinite(reward):
             raise ValueError("feedback reward is not finite")
+        # FAKE_FEEDBACK_LOG lets a test inspect the frames C actually sends
+        log = os.environ.get("FAKE_FEEDBACK_LOG")
+        if log:
+            with open(log, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(command, separators=(",", ":")) + "\n")
         self.observations += 1
         emit({"v": 1, "t": "learn", "tile_bias": [], "pair_bias": [],
               "context_bias": [], "observations": self.observations})
