@@ -6360,17 +6360,24 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--version")) { printf("wfc 5.3 \u2014 quality evolution studio\n"); return 0; }
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             printf("wave function collapse, animated in your terminal\n\n"
-                   "  --mode circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium|delta  tileset\n"
-                   "  --w N --h N                      grid cells (default: auto-fit window)\n"
+                   "  --mode NAME                      tileset, one of %d worlds:\n", NMODES);
+            /* wrapped straight from MODES[], so --help cannot go stale */
+            for (int m = 0; m < NMODES; m += 6) {
+                fputs("                                   ", stdout);
+                for (int k = m; k < m + 6 && k < NMODES; k++)
+                    printf("%s%s", k > m ? " " : "", MODES[k]);
+                fputc('\n', stdout);
+            }
+            printf("  --w N --h N                      grid cells (default: auto-fit window)\n"
                    "  --seed N|word                    rng seed (words are hashed)\n"
                    "  --speed N                        collapse steps/sec (default 1600)\n"
                    "  --save FILE.png|.bmp             auto-save map on completion\n"
                    "  --report FILE.json               quality + thermo + studio report\n"
-                   "  --solver classic|thermo         collapse engine (thermo = adaptive sidecar)\n"
+                   "  --solver classic|thermo          collapse engine (thermo = adaptive sidecar)\n"
                    "  --no-learn                       disable persistent thermo preferences\n"
                    "  --thermo-profile DIR             store thermo profiles in DIR\n"
-                   "  --reset-learning                clear the active thermo profile\n"
-                   "                   THRML is optional; bounded Python proposals remain available\n"
+                   "  --reset-learning                 clear the active thermo profile\n"
+                   "                                   THRML optional; bounded proposals always work\n"
                    "  --gif FILE.gif                   record collapse animation\n"
                    "  --cycle                          auto-cycle modes forever (screensaver)\n"
                    "  --zen                            worlds dissolve into each other, never restarts\n"

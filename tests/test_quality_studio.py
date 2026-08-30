@@ -111,6 +111,15 @@ class QualityStudioTests(unittest.TestCase):
         self.assertIn("--evolve N", result.stdout)
         self.assertIn("--fullscreen", result.stdout)
 
+    def test_help_lists_every_registered_mode(self):
+        """--help renders the mode list from MODES[], so it cannot go stale."""
+        modes = self.run_wfc("--list-modes").stdout.split()
+        self.assertGreater(len(modes), 20)
+        help_text = self.run_wfc("--help").stdout
+        self.assertIn("one of %d worlds" % len(modes), help_text)
+        for mode in modes:
+            self.assertIn(mode, help_text)
+
 
 if __name__ == "__main__":
     unittest.main()
