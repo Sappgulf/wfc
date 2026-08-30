@@ -16,6 +16,13 @@ int main(void) {
     grid_alloc(W_, H_);
     grid_reset();
 
+    assert(strcmp(macro_name(), "delta-channel") == 0);
+    assert(macro_guided_cells() > 0);
+    QualityHotspot hotspot = quality_hotspot();
+    assert(hotspot.x >= 0 && hotspot.x < W_);
+    assert(hotspot.y >= 0 && hotspot.y < H_);
+    assert(hotspot.score >= 0.0 && hotspot.score <= 1.0);
+
     int cell = IDX(3, 3);
     uint64_t original = dom_[cell];
     assert(original && pc64(original) > 1);

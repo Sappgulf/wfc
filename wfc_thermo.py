@@ -52,12 +52,16 @@ import time
 
 from wfc_learning import (
     CONTEXT_COUNT,
+    METRIC_KEYS,
     load_profile,
     new_state,
     reset_state,
     save_profile,
     tile_fingerprint,
     _normalize_metrics,
+    _normalize_metric_delta,
+    _normalize_objective_weights,
+    objective_signal,
     update_state,
 )
 
@@ -232,6 +236,28 @@ def validate_spec(spec):
     if not isinstance(quality_focus, str) or len(quality_focus) > 32:
         raise ValueError("quality_focus must be a short string")
     spec["quality_focus"] = quality_focus
+    spec["quality_weights"] = _normalize_objective_weights(
+        spec.get("quality_weights")
+    )
+    priors = spec.get("quality_priors", [0.0] * ntiles)
+    if not isinstance(priors, list) or len(priors) != ntiles:
+        raise ValueError("quality_priors must have ntiles entries")
+    try:
+        priors = [float(value) for value in priors]
+    except (TypeError, ValueError):
+        raise ValueError("quality_priors not numeric")
+    if not all(math.isfinite(value) and -1.0 <= value <= 1.0 for value in priors):
+        raise ValueError("quality_priors must be finite values in [-1, 1]")
+    spec["quality_priors"] = priors
+    macro_name = spec.get("macro_name", "none")
+    if not isinstance(macro_name, str) or len(macro_name) > 32:
+        raise ValueError("macro_name must be a short string")
+    spec["macro_name"] = macro_name
+    guided_cells = spec.get("macro_guided_cells", 0)
+    if (isinstance(guided_cells, bool) or not isinstance(guided_cells, int) or
+            guided_cells < 0 or guided_cells > n):
+        raise ValueError("macro_guided_cells is out of range")
+    spec["macro_guided_cells"] = guided_cells
     learn = spec.get("learn", True)
     if not isinstance(learn, bool):
         raise ValueError("learn must be boolean")
@@ -626,6 +652,10 @@ class ThermoSession:
         self.pending = None
         self.sampler = "python"
         self.quality_focus = "general"
+        self.quality_weights = {}
+        self.quality_priors = []
+        self.macro_name = "none"
+        self.macro_guided_cells = 0
 
     def _identity(self, spec):
         mode = spec.get("mode", "default")
@@ -666,6 +696,10 @@ class ThermoSession:
         self.beta_scale = 1.0
         self.pending = None
         self.quality_focus = spec["quality_focus"] or "general"
+        self.quality_weights = dict(spec["quality_weights"])
+        self.quality_priors = list(spec["quality_priors"])
+        self.macro_name = spec["macro_name"]
+        self.macro_guided_cells = spec["macro_guided_cells"]
         # The persistent path is deliberately the bounded Python proposal
         # engine.  THRML remains available for the legacy one-shot API, but
         # claiming it here would misdescribe the incremental worker.
@@ -679,6 +713,10 @@ class ThermoSession:
             "schema": 1,
             "sampler": self.sampler,
             "quality_focus": self.quality_focus,
+            "quality_weights": self.quality_weights,
+            "quality_prior_count": len(self.quality_priors),
+            "macro_name": self.macro_name,
+            "macro_guided_cells": self.macro_guided_cells,
             "observations": self.state["observations"],
             "pbits": int(pbits),
         })
@@ -753,7 +791,8 @@ class ThermoSession:
             weight = max(float(self.spec["unary"][tile]), 1e-9)
             score = (math.log(weight) + self.state["tile_bias"][tile] +
                      0.34 * pair_score + 0.18 * self.state["context_bias"][context] +
-                     0.035 * math.log1p(support))
+                     0.035 * math.log1p(support) +
+                     0.30 * self.quality_priors[tile])
             options.append((tile, score, context))
         return options
 
@@ -953,6 +992,17 @@ class ThermoSession:
                 "focus": command.get("quality_focus", self.quality_focus),
             }
         metrics = _normalize_metrics(metrics)
+        metrics_delta = command.get("metrics_delta")
+        if metrics_delta is None:
+            previous = self.state.get("metrics_history", [])[-1:] if self.state else []
+            previous = previous[0] if previous else {}
+            metrics_delta = {
+                key: metrics.get(key, 0.0) - previous.get(key, metrics.get(key, 0.0))
+                for key in METRIC_KEYS if key in metrics
+            }
+            metrics_delta["focus"] = metrics.get("focus", self.quality_focus)
+        metrics_delta = _normalize_metric_delta(metrics_delta)
+        signal = objective_signal(reward, metrics_delta, self.quality_weights)
         if self.learn:
             update_state(
                 self.state,
@@ -961,6 +1011,8 @@ class ThermoSession:
                 self._feedback_events(command, "pair_events"),
                 self._feedback_events(command, "context_events"),
                 metrics=metrics,
+                metric_delta=metrics_delta,
+                objective_weights=self.quality_weights,
             )
             self._save()
         metrics_history = self.state.get("metrics_history", [])
@@ -974,8 +1026,11 @@ class ThermoSession:
             "pair_bias": [round(float(value), 6) for value in self.state["pair_bias"]],
             "context_bias": [round(float(value), 6) for value in self.state["context_bias"]],
             "beta_scale": round(self.beta_scale, 6),
+            "objective_signal": round(signal, 6),
             "metrics": latest_metrics,
+            "metrics_delta": metrics_delta,
             "metrics_history_count": len(metrics_history),
+            "objective_history_count": len(self.state.get("objective_history", [])),
         })
         self.pending = None
 

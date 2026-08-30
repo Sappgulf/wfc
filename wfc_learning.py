@@ -25,6 +25,7 @@ METRIC_KEYS = (
     "stability",
     "topology",
 )
+QUALITY_COMPONENT_KEYS = METRIC_KEYS[1:]
 
 
 def _is_int(value):
@@ -74,6 +75,7 @@ def new_state(ntiles, pair_count, context_count=CONTEXT_COUNT):
         "context_bias": [0.0] * context_count,
         "quality_history": [],
         "metrics_history": [],
+        "objective_history": [],
     }
 
 
@@ -118,6 +120,64 @@ def _normalize_metrics(metrics):
     return normalized
 
 
+def _normalize_metric_delta(delta):
+    """Validate a signed quality-vector delta in the range [-1, 1]."""
+    if delta is None:
+        return None
+    if not isinstance(delta, dict):
+        raise ValueError("metrics_delta must be an object")
+    normalized = {}
+    for key in METRIC_KEYS:
+        if key not in delta:
+            continue
+        value = _finite(delta[key], "%s metric delta" % key)
+        if not -1.0 <= value <= 1.0:
+            raise ValueError("%s metric delta is out of range" % key)
+        normalized[key] = value
+    if "focus" in delta:
+        focus = delta["focus"]
+        if not isinstance(focus, str) or len(focus) > 32:
+            raise ValueError("metric delta focus must be a short string")
+        normalized["focus"] = focus
+    return normalized
+
+
+def _normalize_objective_weights(weights):
+    """Return a positive, bounded mode objective with seven components."""
+    if weights is None:
+        return {key: 1.0 / len(QUALITY_COMPONENT_KEYS)
+                for key in QUALITY_COMPONENT_KEYS}
+    if not isinstance(weights, dict):
+        raise ValueError("quality_weights must be an object")
+    normalized = {}
+    total = 0.0
+    for key in QUALITY_COMPONENT_KEYS:
+        if key not in weights:
+            raise ValueError("quality_weights missing %s" % key)
+        value = _finite(weights[key], "%s quality weight" % key)
+        if value < 0.0 or value > 1.0:
+            raise ValueError("%s quality weight is out of range" % key)
+        normalized[key] = value
+        total += value
+    if total <= 0.0 or total > 1.000001:
+        raise ValueError("quality_weights must sum to (0, 1]")
+    return normalized
+
+
+def objective_signal(reward, metric_delta=None, objective_weights=None):
+    """Blend acceptance reward with the active mode's weighted improvement."""
+    reward = _clamp(_finite(reward, "reward"), -1.0, 1.0)
+    delta = _normalize_metric_delta(metric_delta)
+    if not delta:
+        return reward
+    weights = _normalize_objective_weights(objective_weights)
+    weighted = sum(weights[key] * delta.get(key, 0.0)
+                   for key in QUALITY_COMPONENT_KEYS)
+    total_delta = delta.get("total", 0.0)
+    improvement = 0.35 * total_delta + 0.65 * weighted
+    return _clamp(reward + 0.35 * improvement, -1.0, 1.0)
+
+
 def _validate_state(state, ntiles, pair_count, context_count=CONTEXT_COUNT):
     if not isinstance(state, dict):
         raise ValueError("profile state must be an object")
@@ -150,11 +210,26 @@ def _validate_state(state, ntiles, pair_count, context_count=CONTEXT_COUNT):
         raise ValueError("metrics_history is invalid")
     for metrics in metrics_history:
         _normalize_metrics(metrics)
+    objective_history = state.get("objective_history", [])
+    if not isinstance(objective_history, list) or len(objective_history) > HISTORY_LIMIT:
+        raise ValueError("objective_history is invalid")
+    for item in objective_history:
+        if not isinstance(item, dict):
+            raise ValueError("objective history item must be an object")
+        for key in ("reward", "signal"):
+            value = _finite(item.get(key), "objective history %s" % key)
+            if not -1.0 <= value <= 1.0:
+                raise ValueError("objective history %s is out of range" % key)
+        _normalize_metric_delta(item.get("delta", {}))
+        focus = item.get("focus", "")
+        if not isinstance(focus, str) or len(focus) > 32:
+            raise ValueError("objective history focus must be a short string")
     return state
 
 
 def update_state(state, reward, tile_events, pair_events, context_events,
-                 learning_rate=0.06, decay=0.995, metrics=None):
+                 learning_rate=0.06, decay=0.995, metrics=None,
+                 metric_delta=None, objective_weights=None):
     """Apply one bounded reward update and return the mutated state."""
     if not isinstance(state, dict):
         raise ValueError("state must be an object")
@@ -162,6 +237,7 @@ def update_state(state, reward, tile_events, pair_events, context_events,
     learning_rate = _finite(learning_rate, "learning_rate")
     decay = _finite(decay, "decay")
     normalized_metrics = _normalize_metrics(metrics)
+    normalized_delta = _normalize_metric_delta(metric_delta)
     if learning_rate <= 0.0 or learning_rate > 1.0:
         raise ValueError("learning_rate must be in (0, 1]")
     if decay < 0.0 or decay > 1.0:
@@ -173,9 +249,10 @@ def update_state(state, reward, tile_events, pair_events, context_events,
         len(state.get("context_bias", [])),
     )
     reward = _clamp(reward, -1.0, 1.0)
-    delta = _clamp(reward - state["baseline"], -1.0, 1.0)
+    signal = objective_signal(reward, normalized_delta, objective_weights)
+    delta = _clamp(signal - state["baseline"], -1.0, 1.0)
     state["baseline"] = _clamp(
-        state["baseline"] * 0.95 + reward * 0.05,
+        state["baseline"] * 0.95 + signal * 0.05,
         -1.0,
         1.0,
     )
@@ -186,12 +263,20 @@ def update_state(state, reward, tile_events, pair_events, context_events,
     _apply_events(state["pair_bias"], pair_events, delta, learning_rate, decay, "pair")
     _apply_events(state["context_bias"], context_events, delta, learning_rate, decay, "context")
     state["observations"] += 1
-    state["quality_history"].append(reward)
+    state["quality_history"].append(signal)
     del state["quality_history"][:-HISTORY_LIMIT]
     state.setdefault("metrics_history", [])
     if normalized_metrics is not None:
         state["metrics_history"].append(normalized_metrics)
         del state["metrics_history"][:-HISTORY_LIMIT]
+    state.setdefault("objective_history", [])
+    state["objective_history"].append({
+        "reward": reward,
+        "signal": signal,
+        "delta": normalized_delta or {},
+        "focus": (normalized_metrics or {}).get("focus", ""),
+    })
+    del state["objective_history"][:-HISTORY_LIMIT]
     return state
 
 
@@ -234,6 +319,7 @@ def load_profile(path, mode, fingerprint, ntiles, pair_count,
         if payload.get("mode") != str(mode) or payload.get("fingerprint") != str(fingerprint):
             return fresh
         state = dict(payload)
+        state.setdefault("objective_history", [])
         _validate_state(state, ntiles, pair_count, context_count)
         state["mode"] = str(mode)
         state["fingerprint"] = str(fingerprint)

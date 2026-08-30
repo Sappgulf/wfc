@@ -53,6 +53,12 @@ def init_payload(domains=None):
         "cdir": [[3, 3] for _ in range(4)],
         "domains": domains or [3] * 6,
         "learn": True,
+        "quality_weights": {
+            "validity": 0.30, "boundary": 0.18, "coverage": 0.14,
+            "diversity": 0.08, "smoothness": 0.08, "stability": 0.06,
+            "topology": 0.16,
+        },
+        "quality_priors": [0.2, 0.1],
     }
 
 
@@ -62,12 +68,17 @@ class ProtocolContractTests(unittest.TestCase):
 
     def tearDown(self):
         if self.proc is not None:
-            if self.proc.poll() is None:
-                self.proc.kill()
-                self.proc.wait(timeout=2)
-            for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
-                if stream is not None:
-                    stream.close()
+            self.close_process(self.proc)
+
+    def close_process(self, proc):
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+        if proc is self.proc:
+            self.proc = None
 
     def launch(self):
         self.assertTrue(WORKER.exists(), "fake thermo worker has not been added")
@@ -90,6 +101,8 @@ class ProtocolContractTests(unittest.TestCase):
         ready = read_event(proc)
         self.assertEqual(ready["t"], "ready")
         self.assertEqual(ready["sampler"], "python")
+        self.assertEqual(ready["quality_prior_count"], 2)
+        self.assertEqual(ready["quality_weights"]["topology"], 0.16)
         send(proc, {"v": 1, "t": "stop"})
         self.assertEqual(proc.wait(timeout=2), 0)
 
@@ -108,6 +121,36 @@ class ProtocolContractTests(unittest.TestCase):
         })
         self.assertEqual(read_event(proc)["t"], "fatal")
         self.assertEqual(proc.wait(timeout=2), 1)
+
+    def test_quality_objective_rejects_bad_shape_and_accepts_metric_delta(self):
+        proc = self.launch_worker(REAL_WORKER)
+        payload = init_payload()
+        payload["quality_priors"] = [0.1]
+        send(proc, payload)
+        self.assertEqual(read_event(proc)["t"], "fatal")
+        self.assertEqual(proc.wait(timeout=2), 1)
+        self.close_process(proc)
+
+        with tempfile.TemporaryDirectory() as profile_dir:
+            proc = self.launch_worker(REAL_WORKER)
+            payload = init_payload()
+            payload["profile_dir"] = profile_dir
+            send(proc, payload)
+            ready = read_event(proc)
+            self.assertEqual(ready["t"], "ready")
+            send(proc, {"v": 1, "t": "feedback", "reward": 0.1,
+                        "accepted": 1, "rejected": 0, "contradictions": 0,
+                        "tile_events": [], "pair_events": [], "context_events": [],
+                        "metrics": {"total": 0.7, "topology": 0.8, "focus": "streets"},
+                        "metrics_delta": {"total": 0.1, "topology": 0.2,
+                                          "focus": "streets"}})
+            learned = read_event(proc)
+            self.assertEqual(learned["t"], "learn")
+            self.assertGreater(learned["objective_signal"], 0.1)
+            self.assertEqual(learned["metrics_delta"]["topology"], 0.2)
+            self.assertEqual(learned["objective_history_count"], 1)
+            send(proc, {"v": 1, "t": "stop"})
+            self.assertEqual(proc.wait(timeout=2), 0)
 
     def test_real_worker_learns_incrementally_and_persists_profile(self):
         with tempfile.TemporaryDirectory() as profile_dir:

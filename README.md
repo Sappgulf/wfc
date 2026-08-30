@@ -51,6 +51,7 @@ heightfield view, `i` for the isometric relief view of any solved world.
 `u` undo · `i` iso view · `,` / `.` scrub the collapse in time ·
 `n` zen mode · `T` toggle the thermodynamic solver · `R` reset thermo learning ·
 `l` quality observatory · `P` pin/unpin the hovered cell ·
+`Q` quality heatmap · `E` Evolution Lab (rank seed variants) ·
 `w a s d` hero crawl
 through solved dungeons (light all the torches) · `h` help · `q` quit
 
@@ -71,6 +72,7 @@ Mouse: left-click seed, right-click carve or unpin, drag paint, hover inspect.
 --gallery out.html  all-mode web showcase
 --collage out.png    mosaic of all worlds
 --bench      performance table
+--evolve N   rank 2-8 deterministic variants (classic single-world)
 --pan        camera drift
 --daycycle   terrain dawn/dusk
 --sound      synth sfx + per-world ambient drones
@@ -87,11 +89,28 @@ Mouse: left-click seed, right-click carve or unpin, drag paint, hover inspect.
 
 The quality observatory (`l`) pauses the current run and shows the active
 mode focus, all eight quality dimensions, thermo counters, and a bounded
-64-sample trend. `--report FILE.json` writes the same reproducible snapshot
-for scripts, including mode, seed, dimensions, solver, learner counters, and
-pin count. `P` pins the hovered singleton (collapsing it transactionally if
-needed); `P` again or right-click reopens it only where current neighbors
-allow. `u` restores the previous domain and pin state.
+64-sample trend. It also names the current macro skeleton and the weakest
+cell with a repair reason. `Q` overlays a live local-quality heatmap: red is a
+weak or unresolved cell, amber is mixed, and teal is healthy. The overlay is
+diagnostic only; it never changes domains.
+
+`--report FILE.json` writes a reproducible schema-2 snapshot for scripts,
+including mode, seed, dimensions, solver, profile weights, hotspot details,
+macro guidance, Evolution Lab scores, learner counters, and pin count. `P`
+pins the hovered singleton (collapsing it transactionally if needed); `P` again
+or right-click reopens it only where current neighbors allow. `u` restores the
+previous domain and pin state.
+
+`E` opens the Evolution Lab in classic single-world mode. It derives a small
+tournament of seeds from the current seed, replays current pins into every
+candidate, scores the complete quality vector, and restores the winning map.
+The equivalent headless command is `--evolve 4`; it prints ranked scores and
+leaves the winner active for `--save` or `--report`.
+
+The network worlds have deterministic macro guidance before local WFC detail:
+streets uses an arterial grid, neurons use soma/branch rays, mycelium uses
+spore tendrils, and delta uses a source-to-mouth channel field. These are soft
+priors, so hard compatibility and propagation still decide the final map.
 
 Headless runs are intentionally bounded: `--twin`, `--quad`, and
 `--infinite` require an interactive terminal. Numeric options are validated
@@ -135,13 +154,14 @@ rounds, and measured `feedback`; the worker returns `ready`, `stats`,
 incremental `proposal` patches, and `learn` updates. C transactionally applies
 each patch through the authoritative propagator and rolls it back on a
 contradiction. Each feedback frame carries the complete mode-aware quality
-vector, and the learner records a bounded metric history in addition to tile,
+vector, a weighted metric delta, and the active per-tile quality prior; the
+learner records bounded metric and objective history in addition to tile,
 compatible-pair, and boundary-context preferences. Everything is bounded,
 fingerprinted per mode, and atomically persisted in `~/.wfc-thermo` (or
 `--thermo-profile DIR`). `--no-learn` keeps a run ephemeral. The worker
-validates dimensions, masks, domains, metrics, and sampling budgets before
-sampling; malformed requests emit a structured `fatal` line and the C parent
-falls back to the classic solver.
+validates dimensions, masks, domains, objectives, metrics, and sampling budgets
+before sampling; malformed requests emit a structured `fatal` line and the C
+parent falls back to the classic solver.
 
 THRML/JAX is optional. If installed, the legacy one-shot compatibility API can
 use it; the persistent worker deliberately uses its dependency-free bounded
@@ -166,6 +186,15 @@ becomes a heightfield with soft shadows, ambient occlusion, fresnel,
 horizon fog, and a sun-disk — rendered per-dot into braille at ~26fps.
 Albedo comes from the active mode's palette (ray-traced fires, nebulae, seas).
 
+## Benchmark lab
+
+`make quality-benchmark` runs a bounded comparison across streets, neurons,
+mycelium, and delta using classic, thermo-ephemeral (`--no-learn`), and
+thermo-learned (isolated temporary profile) paths. It prints solve success,
+weighted quality, and milliseconds, followed by one JSON line suitable for
+automation. For a deeper local experiment, run
+`python3 tests/quality_benchmark.py --binary ./wfc --trials 2 --w 8 --h 6`.
+
 ## Test discipline
 
 - 25/25 modes solve first-try across seed sweeps
@@ -176,6 +205,7 @@ Albedo comes from the active mode's palette (ray-traced fires, nebulae, seas).
 - Dirty-diff rendering: only changed cells repaint, frames are
   synchronized-output wrapped
 - `--bench` prints a per-mode performance table
+- `make quality-benchmark` compares quality-directed solver paths
 
 ~5,800 lines of C, ~900 lines of Python. `cc -O2 -std=c11 -o wfc wfc.c -lz`
 if you hate make.

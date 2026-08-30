@@ -108,6 +108,26 @@ class LearnerTests(unittest.TestCase):
                 metrics={"total": float("nan")},
             )
 
+    def test_objective_history_uses_weighted_metric_delta_and_is_bounded(self):
+        state = new_state(2, 4)
+        weights = {
+            "validity": 0.10, "boundary": 0.10, "coverage": 0.10,
+            "diversity": 0.10, "smoothness": 0.10, "stability": 0.10,
+            "topology": 0.40,
+        }
+        for _ in range(70):
+            update_state(
+                state, 0.0, [], [], [],
+                metrics={"total": 0.5, "topology": 0.9, "focus": "neurons"},
+                metric_delta={"total": 0.0, "topology": 1.0, "focus": "neurons"},
+                objective_weights=weights,
+            )
+        self.assertEqual(len(state["objective_history"]), 64)
+        self.assertGreater(state["objective_history"][-1]["signal"], 0.0)
+        save_profile(str(self.tmp_path / "objective.json"), "neurons", "beef", state)
+        loaded = load_profile(str(self.tmp_path / "objective.json"), "neurons", "beef", 2, 4)
+        self.assertEqual(len(loaded["objective_history"]), 64)
+
 
 if __name__ == "__main__":
     unittest.main()

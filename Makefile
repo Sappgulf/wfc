@@ -47,7 +47,7 @@ regression: wfc
 python-check:
 	@python3 -m py_compile wfc_learning.py wfc_thermo.py tests/fake_thermo.py \
 		tests/test_wfc_learning.py tests/test_protocol_contract.py tests/test_c_bridge.py \
-		tests/test_quality_studio.py
+		tests/test_quality_studio.py tests/quality_benchmark.py tests/test_quality_benchmark.py
 	@echo 'python: syntax OK'
 
 protocol-check:
@@ -78,6 +78,9 @@ studio-c-check:
 		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /tmp/wfc_studio_test tests/test_wfc_studio.c -lz
 	@/tmp/wfc_studio_test
 
+quality-benchmark: wfc
+	@python3 tests/quality_benchmark.py --binary ./wfc --trials 1 --w 8 --h 6
+
 fuzz: wfc_asan
 	@set -e; modes=$$(./wfc --list-modes); n=$$(echo "$$modes" | wc -l | tr -d ' '); \
 	fail=0; \
@@ -102,4 +105,4 @@ clean:
 install: wfc
 	install -m 0755 wfc /usr/local/bin/wfc
 
-.PHONY: clean install asan strict debug test regression python-check protocol-check bridge-check learning-check quality-check studio-check studio-c-check fuzz
+.PHONY: clean install asan strict debug test regression python-check protocol-check bridge-check learning-check quality-check studio-check studio-c-check quality-benchmark fuzz

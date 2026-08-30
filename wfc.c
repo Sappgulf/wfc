@@ -88,11 +88,24 @@ static int g_loot = 0, g_loot_tot = 0;
 static char g_collage_path[512] = {0};
 static char g_report_path[512] = {0};
 static int g_zoom = 1;
+static int g_evolve_count = 0;
+static bool g_heatmap = false;
+static bool g_evolve_view = false;
+static bool g_evolve_was_paused = false;
+#define EVOLUTION_MAX 8
+static int g_evolution_n = 0;
+static uint64_t g_evolution_seeds[EVOLUTION_MAX];
+static double g_evolution_scores[EVOLUTION_MAX];
+static uint64_t g_evolution_winner_seed = 0;
 static int g_fit_w = 80, g_fit_h = 24;   /* terminal viewport in cells */
 static int g_vx = 0, g_vy = 0;
 static double now_ms(void);
 static void quality_trace_clear(void);
 static void thermo_json_string(FILE *f, const char *s);
+static void macro_build(void);
+static double quality_clamp(double v);
+static double quality_signed_clamp(double v);
+static bool evolution_run(int requested);
 static int g_inf_ax = 0, g_inf_ay = 0;
 static uint32_t *prev_sig_ = NULL;
 static size_t prev_sig_cap_ = 0;
@@ -617,6 +630,8 @@ static uint8_t *river_;      /* terrain only: cell is on a river */
 static int *river_rank_;     /* carve order for animated reveal */
 static int n_river_;
 static int g_river_show;     /* how many river cells are revealed */
+static uint8_t *macro_role_; /* low-frequency design guidance for network modes */
+static int macro_guided_count_;
 
 static void *slots_dom[MAXW];
 static int *slots_stk[MAXW];
@@ -661,14 +676,17 @@ static void grid_alloc(int w, int h) {
     free_world_buffers();
     free(river_); free(river_rank_);
     free(comp_); free(comp_col_);
+    free(macro_role_);
     free(studio_pin_); free(studio_tile_);
     studio_pin_ = NULL; studio_tile_ = NULL; studio_pin_count_ = 0;
+    macro_role_ = NULL; macro_guided_count_ = 0;
     dom_ = malloc(sizeof(uint64_t) * (size_t)w * h);
     stk_ = malloc(sizeof(int) * (size_t)w * h * MAXT);
     river_ = malloc((size_t)w * h);
     river_rank_ = malloc(sizeof(int) * (size_t)w * h);
     comp_ = malloc(sizeof(int) * (size_t)w * h);
     comp_col_ = malloc(sizeof(RGB) * (size_t)w * h);
+    macro_role_ = calloc((size_t)w * h, 1);
     studio_pin_ = calloc((size_t)w * h, 1);
     studio_tile_ = malloc((size_t)w * h);
     free(domB_); free(stkB_); free(domC_); free(stkC_); free(domD_); free(stkD_);
@@ -679,13 +697,16 @@ static void grid_alloc(int w, int h) {
     domD_ = malloc(sizeof(uint64_t) * (size_t)w * h);
     stkD_ = malloc(sizeof(int) * (size_t)w * h * MAXT);
     if (!dom_ || !stk_ || !river_ || !river_rank_ || !comp_ || !comp_col_ ||
+        !macro_role_ ||
         !studio_pin_ || !studio_tile_ ||
         !domB_ || !stkB_ || !domC_ || !stkC_ || !domD_ || !stkD_) {
         perror("malloc");
         free_world_buffers();
         free(river_); free(river_rank_); free(comp_); free(comp_col_);
+        free(macro_role_);
         free(studio_pin_); free(studio_tile_);
         river_ = NULL; river_rank_ = NULL; comp_ = NULL; comp_col_ = NULL;
+        macro_role_ = NULL;
         studio_pin_ = NULL; studio_tile_ = NULL;
         exit(1);
     }
@@ -721,13 +742,14 @@ static bool world_grow(void) {
     int *nrr = malloc(sizeof(int) * (size_t)gw * gh);
     uint8_t *npin = calloc((size_t)gw * gh, 1);
     uint8_t *ntile = calloc((size_t)gw * gh, 1);
-    if (!nd || !ns || !nriv || !nrr || !npin || !ntile) {
-        free(nd); free(ns); free(nriv); free(nrr); free(npin); free(ntile); return false;
+    uint8_t *nmacro = calloc((size_t)gw * gh, 1);
+    if (!nd || !ns || !nriv || !nrr || !npin || !ntile || !nmacro) {
+        free(nd); free(ns); free(nriv); free(nrr); free(npin); free(ntile); free(nmacro); return false;
     }
     int *nc = malloc(sizeof(int) * (size_t)gw * gh);
     RGB *ncc = malloc(sizeof(RGB) * (size_t)gw * gh);
     if (!nc || !ncc) {
-        free(nc); free(ncc); free(nd); free(ns); free(nriv); free(nrr); free(npin); free(ntile);
+        free(nc); free(ncc); free(nd); free(ns); free(nriv); free(nrr); free(npin); free(ntile); free(nmacro);
         return false;
     }
     uint64_t full = ((uint64_t)1 << ntiles_) - 1;
@@ -740,18 +762,21 @@ static bool world_grow(void) {
             nd[(size_t)(y + oy) * gw + (x + ox)] = v;
             npin[(size_t)(y + oy) * gw + (x + ox)] = studio_pin_[IDX(x, y)];
             ntile[(size_t)(y + oy) * gw + (x + ox)] = studio_tile_[IDX(x, y)];
+            nmacro[(size_t)(y + oy) * gw + (x + ox)] = macro_role_[IDX(x, y)];
             if (river_rank_[IDX(x, y)] >= 0 && g_river_show > 0)
                 nriv[(size_t)(y + oy) * gw + (x + ox)] = 1,
                 nrr[(size_t)(y + oy) * gw + (x + ox)] = river_rank_[IDX(x, y)];
         }
     free(dom_); free(stk_); free(river_); free(river_rank_);
     free(comp_); free(comp_col_);
+    free(macro_role_);
     free(studio_pin_); free(studio_tile_);
     comp_ = nc; comp_col_ = ncc;
     dom_ = nd; stk_ = ns; river_ = nriv; river_rank_ = nrr;
-    studio_pin_ = npin; studio_tile_ = ntile;
+    studio_pin_ = npin; studio_tile_ = ntile; macro_role_ = nmacro;
     int old_w = W_, old_h = H_;
     W_ = gw; H_ = gh;
+    macro_build();
     g_inf_ax += ox;
     g_inf_ay += oy;
     full_repaint_ = true;
@@ -760,6 +785,8 @@ static bool world_grow(void) {
     n_river_ = 0;
     studio_pin_count_ = 0;
     for (int i = 0; i < gw * gh; i++) studio_pin_count_ += studio_pin_[i] != 0;
+    macro_guided_count_ = 0;
+    for (int i = 0; i < gw * gh; i++) macro_guided_count_ += macro_role_[i] != 0;
     world_sync();
     /* pre-constrain the new ring from the solved bedrock border so the
      * solver doesn't immediately contradict at the seam */
@@ -841,6 +868,7 @@ static void grid_reset(void) {
     memset(studio_pin_, 0, (size_t)W_ * H_);
     memset(studio_tile_, 0, (size_t)W_ * H_);
     studio_pin_count_ = 0;
+    macro_build();
     quality_trace_clear();
 }
 
@@ -947,13 +975,141 @@ static void carve_rivers(void) {
 }
 static int pc64(uint64_t x) { return __builtin_popcountll(x); }
 
-static int weighted_pick(uint64_t m) {
+enum {
+    MACRO_NONE = 0,
+    MACRO_ARTERIAL = 1,
+    MACRO_INTERSECTION = 2,
+    MACRO_SOMA = 3,
+    MACRO_BRANCH = 4,
+    MACRO_TERMINAL = 5,
+    MACRO_SOURCE = 6,
+    MACRO_CHANNEL = 7,
+    MACRO_CONFLUENCE = 8,
+};
+
+static bool macro_network_mode(void) {
+    const char *m = MODES[g_mode_idx];
+    return !strcmp(m, "streets") || !strcmp(m, "neurons") ||
+           !strcmp(m, "mycelium") || !strcmp(m, "delta");
+}
+
+static const char *macro_name(void) {
+    const char *m = MODES[g_mode_idx];
+    if (!strcmp(m, "streets")) return "arterial-grid";
+    if (!strcmp(m, "neurons")) return "soma-branches";
+    if (!strcmp(m, "mycelium")) return "spore-tendrils";
+    if (!strcmp(m, "delta")) return "delta-channel";
+    return "none";
+}
+
+static int macro_role_at(int x, int y) {
+    if (!macro_network_mode() || W_ <= 0 || H_ <= 0) return MACRO_NONE;
+    const char *m = MODES[g_mode_idx];
+    int dx = x - W_ / 2, dy = y - H_ / 2;
+    int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+    uint32_t salt = (uint32_t)(g_seed ^ (g_seed >> 32));
+    uint32_t h = hash3((uint32_t)x, (uint32_t)y, salt ^ 0xA51C3E17u);
+    if (!strcmp(m, "streets")) {
+        int wx = W_ > 12 ? 1 : 0, wy = H_ > 10 ? 1 : 0;
+        if (adx <= wx && ady <= wy) return MACRO_INTERSECTION;
+        if (adx <= wx || ady <= wy) return MACRO_ARTERIAL;
+        int side = 5 + (int)(salt % 3);
+        if (((x + y * 2 + (int)(salt % (uint32_t)side)) % side) == 0)
+            return MACRO_ARTERIAL;
+    } else if (!strcmp(m, "neurons")) {
+        if (adx <= 1 && ady <= 1) return MACRO_SOMA;
+        if (adx > 1 && ady > 1 && abs(adx - ady) <= 1) return MACRO_BRANCH;
+        if ((h % 17) < 2) return MACRO_BRANCH;
+        if (x == 0 || y == 0 || x == W_ - 1 || y == H_ - 1)
+            return MACRO_TERMINAL;
+    } else if (!strcmp(m, "mycelium")) {
+        int sx = W_ / 3, sy = H_ / 3;
+        int sx2 = (2 * W_) / 3, sy2 = (2 * H_) / 3;
+        int d1 = abs(x - sx) + abs(y - sy);
+        int d2 = abs(x - sx2) + abs(y - sy2);
+        if (d1 <= 1 || d2 <= 1) return MACRO_SOURCE;
+        if ((h % 11) < 4 || abs((int)(h % 7) - 3) <= 1)
+            return MACRO_BRANCH;
+        if (h % 23 == 0) return MACRO_TERMINAL;
+    } else if (!strcmp(m, "delta")) {
+        int channel_y = H_ / 2 + (int)(h % 3) - 1;
+        if (x == 0 && ady <= 1) return MACRO_SOURCE;
+        if (x == W_ - 1 && abs(y - H_ / 2) <= 1) return MACRO_CONFLUENCE;
+        if (abs(y - channel_y) == 0) return MACRO_CHANNEL;
+        if (x > W_ / 5 && (abs(y - (H_ / 2 - 2)) <= 1 ||
+                           (h % 13) < 3)) return MACRO_BRANCH;
+    }
+    return MACRO_NONE;
+}
+
+static void macro_build(void) {
+    macro_guided_count_ = 0;
+    if (!macro_role_ || W_ <= 0 || H_ <= 0) return;
+    memset(macro_role_, MACRO_NONE, (size_t)W_ * H_);
+    if (!macro_network_mode()) return;
+    for (int y = 0; y < H_; y++)
+        for (int x = 0; x < W_; x++) {
+            uint8_t role = (uint8_t)macro_role_at(x, y);
+            macro_role_[IDX(x, y)] = role;
+            macro_guided_count_ += role != MACRO_NONE;
+        }
+}
+
+static int macro_guided_cells(void) { return macro_guided_count_; }
+
+static int macro_target_degree(int role) {
+    const char *m = MODES[g_mode_idx];
+    if (!strcmp(m, "streets"))
+        return role == MACRO_INTERSECTION ? 4 : 2;
+    if (!strcmp(m, "neurons"))
+        return role == MACRO_SOMA ? 3 : role == MACRO_TERMINAL ? 1 : 2;
+    if (!strcmp(m, "mycelium"))
+        return role == MACRO_SOURCE ? 1 : role == MACRO_TERMINAL ? 1 : 2;
+    if (!strcmp(m, "delta"))
+        return role == MACRO_SOURCE ? 1 : role == MACRO_CONFLUENCE ? 3 :
+               role == MACRO_BRANCH ? 3 : 2;
+    return 2;
+}
+
+static double macro_tile_fit(int cell, int tile) {
+    if (!macro_role_ || cell < 0 || cell >= W_ * H_ ||
+        tile < 0 || tile >= ntiles_ || macro_role_[cell] == MACRO_NONE)
+        return 0.5;
+    int degree = 0;
+    for (int d = 0; d < NDIR; d++) degree += tiles_[tile].e[d] != 0;
+    double fit = 1.0 - fabs((double)degree - macro_target_degree(macro_role_[cell])) / 4.0;
+    return quality_clamp(fit);
+}
+
+static double macro_tile_bonus(int cell, int tile) {
+    return cell >= 0 ? quality_signed_clamp((macro_tile_fit(cell, tile) - 0.5) * 1.6) : 0.0;
+}
+
+static double quality_tile_prior(int tile) {
+    if (!macro_network_mode() || tile < 0 || tile >= ntiles_) return 0.0;
+    const char *m = MODES[g_mode_idx];
+    double ideal = !strcmp(m, "streets") ? 2.2 : !strcmp(m, "neurons") ? 2.0 :
+                   !strcmp(m, "mycelium") ? 1.7 : 1.9;
+    int degree = 0;
+    for (int d = 0; d < NDIR; d++) degree += tiles_[tile].e[d] != 0;
+    return quality_signed_clamp((1.0 - fabs(degree - ideal) / 3.5) * 2.0 - 1.0);
+}
+
+static int weighted_pick_at(uint64_t m, int cell) {
     double tot = 0, acc = 0;
-    for (uint64_t mm = m; mm; mm &= mm - 1) tot += tiles_[__builtin_ctzll(mm)].weight;
+    for (uint64_t mm = m; mm; mm &= mm - 1) {
+        int tile = __builtin_ctzll(mm);
+        double weight = tiles_[tile].weight;
+        if (cell >= 0) weight *= exp(0.52 * macro_tile_bonus(cell, tile));
+        tot += weight;
+    }
     double r = rndf() * tot;
     for (uint64_t mm = m; mm; mm &= mm - 1) {
-        acc += tiles_[__builtin_ctzll(mm)].weight;
-        if (r <= acc) return __builtin_ctzll(mm);
+        int tile = __builtin_ctzll(mm);
+        double weight = tiles_[tile].weight;
+        if (cell >= 0) weight *= exp(0.52 * macro_tile_bonus(cell, tile));
+        acc += weight;
+        if (r <= acc) return tile;
     }
     return __builtin_ctzll(m);
 }
@@ -1002,6 +1158,7 @@ static int wfc_step(void) {
                 slw += tiles_[b].weight * tiles_[b].lw;
             }
             double e = sw > 0 ? log2(sw) - slw / sw : 0;
+            if (macro_role_ && macro_role_[i] != MACRO_NONE) e -= 0.08;
             e += rndf() * 1e-6;
             if (e < be * (1 - 1e-9)) { be = e; best = i; ties = 1; }
             else if (e < be * (1 + 1e-9)) { ties++; if (rndf() * ties < 1.0) best = i; }
@@ -1009,7 +1166,7 @@ static int wfc_step(void) {
     }
     if (best < 0) return 1;
 
-    dom_[best] = 1ULL << weighted_pick(dom_[best]);
+    dom_[best] = 1ULL << weighted_pick_at(dom_[best], best);
     return propagate_from(best) ? 0 : -1;
 }
 
@@ -1061,6 +1218,110 @@ static bool quality_network_mode(void) {
            !strcmp(m, "maze") || !strcmp(m, "streets") ||
            !strcmp(m, "neurons") || !strcmp(m, "mycelium") ||
            !strcmp(m, "delta");
+}
+
+static double macro_coherence(void) {
+    if (!macro_role_ || macro_guided_count_ <= 0) return 1.0;
+    double sum = 0.0;
+    int seen = 0;
+    for (int i = 0; i < W_ * H_; i++) {
+        if (macro_role_[i] == MACRO_NONE) continue;
+        uint64_t domain = dom_[i];
+        if (pc64(domain) != 1) {
+            sum += 0.5;
+            seen++;
+            continue;
+        }
+        sum += macro_tile_fit(i, __builtin_ctzll(domain));
+        seen++;
+    }
+    return seen ? quality_clamp(sum / seen) : 0.5;
+}
+
+typedef struct {
+    int x, y;
+    double score;
+    const char *reason;
+} QualityHotspot;
+
+static double quality_local_cell_score(int x, int y, const char **reason) {
+    if (reason) *reason = "balanced";
+    if (x < 0 || y < 0 || x >= W_ || y >= H_ || !dom_) {
+        if (reason) *reason = "validity";
+        return 0.0;
+    }
+    uint64_t domain = dom_[IDX(x, y)];
+    if (!domain) {
+        if (reason) *reason = "validity";
+        return 0.0;
+    }
+    int choices = pc64(domain);
+    if (choices > 1) {
+        if (reason) *reason = "entropy";
+        return quality_clamp(1.0 / (1.0 + 0.32 * (choices - 1)));
+    }
+    int tile = __builtin_ctzll(domain);
+    double score = 1.0;
+    int known = 0, good = 0, boundary_bad = 0;
+    for (int d = 0; d < NDIR; d++) {
+        int nx = x, ny = y;
+        if (d == 0) ny = g_torus ? (y + H_ - 1) % H_ : y - 1;
+        else if (d == 1) nx = g_torus ? (x + 1) % W_ : x + 1;
+        else if (d == 2) ny = g_torus ? (y + 1) % H_ : y + 1;
+        else nx = g_torus ? (x + W_ - 1) % W_ : x - 1;
+        if (nx < 0 || ny < 0 || nx >= W_ || ny >= H_) {
+            if (bounded_connector_mode() && tiles_[tile].e[d]) boundary_bad++;
+            continue;
+        }
+        uint64_t neighbor = dom_[IDX(nx, ny)];
+        if (pc64(neighbor) != 1) continue;
+        known++;
+        int other = __builtin_ctzll(neighbor);
+        if ((cdir_[d][tile] >> other) & 1ULL) good++;
+    }
+    if (boundary_bad) {
+        if (reason) *reason = "boundary";
+        score *= 0.18;
+    }
+    if (known) {
+        double edge_score = (double)good / known;
+        score *= 0.55 + 0.45 * edge_score;
+        if (!good && reason) *reason = "validity";
+    }
+    if (macro_role_ && macro_role_[IDX(x, y)] != MACRO_NONE) {
+        double fit = macro_tile_fit(IDX(x, y), tile);
+        score = 0.62 * score + 0.38 * fit;
+        if (fit < 0.52 && reason) *reason = "branch";
+    }
+    if (quality_network_mode() && tiles_[tile].e[0] == 0 &&
+        tiles_[tile].e[1] == 0 && tiles_[tile].e[2] == 0 && tiles_[tile].e[3] == 0 &&
+        macro_role_ && macro_role_[IDX(x, y)] != MACRO_NONE) {
+        score *= 0.45;
+        if (reason) *reason = "coverage";
+    }
+    if (boundary_bad == 0 && good == known &&
+        (!macro_role_ || macro_role_[IDX(x, y)] == MACRO_NONE || score >= 0.72)) {
+        if (reason) *reason = "balanced";
+    }
+    return quality_clamp(score);
+}
+
+static QualityHotspot quality_hotspot(void) {
+    QualityHotspot best = {0, 0, 1.0, "waiting"};
+    if (W_ <= 0 || H_ <= 0 || !dom_) return best;
+    for (int y = 0; y < H_; y++) {
+        for (int x = 0; x < W_; x++) {
+            const char *reason = "balanced";
+            double score = quality_local_cell_score(x, y, &reason);
+            if (score < best.score) {
+                best.x = x;
+                best.y = y;
+                best.score = score;
+                best.reason = reason;
+            }
+        }
+    }
+    return best;
 }
 
 static QualityMetrics quality_measure(bool final_map) {
@@ -1157,7 +1418,8 @@ static QualityMetrics quality_measure(bool final_map) {
                        !strcmp(m, "delta") ? 1.9 : 1.8;
         double balance = quality_clamp(1.0 - fabs(degree_sum / active - ideal) / 3.0);
         double active_ratio = quality_clamp((double)active / (double)(decided ? decided : 1));
-        q.topology = quality_clamp(0.55 * balance + 0.45 * active_ratio);
+        q.topology = quality_clamp(0.42 * balance + 0.34 * active_ratio +
+                                   0.24 * macro_coherence());
     }
     QualityProfile profile = quality_profile();
     q.total = quality_clamp(profile.validity * q.validity +
@@ -1200,20 +1462,55 @@ static void quality_record(QualityMetrics q) {
 
 static void quality_json(FILE *f, QualityMetrics q) {
     QualityProfile profile = quality_profile();
+    QualityHotspot hotspot = quality_hotspot();
     fprintf(f, "{\"focus\":\"%s\",\"total\":%.9g,\"validity\":%.9g,"
                "\"boundary\":%.9g,\"coverage\":%.9g,\"diversity\":%.9g,"
-               "\"smoothness\":%.9g,\"stability\":%.9g,\"topology\":%.9g}",
+               "\"smoothness\":%.9g,\"stability\":%.9g,\"topology\":%.9g,"
+               "\"profile_weights\":{\"validity\":%.9g,\"boundary\":%.9g,"
+               "\"coverage\":%.9g,\"diversity\":%.9g,\"smoothness\":%.9g,"
+               "\"stability\":%.9g,\"topology\":%.9g},\"hotspot\":{"
+               "\"x\":%d,\"y\":%d,\"score\":%.9g,\"reason\":",
             profile.focus, quality_clamp(q.total), quality_clamp(q.validity),
             quality_clamp(q.boundary), quality_clamp(q.coverage),
             quality_clamp(q.diversity), quality_clamp(q.smoothness),
-            quality_clamp(q.stability), quality_clamp(q.topology));
+            quality_clamp(q.stability), quality_clamp(q.topology),
+            profile.validity, profile.boundary, profile.coverage, profile.diversity,
+            profile.smoothness, profile.stability, profile.topology,
+            hotspot.x, hotspot.y, quality_clamp(hotspot.score));
+    thermo_json_string(f, hotspot.reason);
+    fputc('}', f);
+    fputc('}', f);
+}
+
+static void quality_delta_json(FILE *f, QualityMetrics before, QualityMetrics after) {
+    fprintf(f, "{\"total\":%.9g,\"validity\":%.9g,\"boundary\":%.9g,"
+               "\"coverage\":%.9g,\"diversity\":%.9g,\"smoothness\":%.9g,"
+               "\"stability\":%.9g,\"topology\":%.9g,\"focus\":",
+            quality_signed_clamp(after.total - before.total),
+            quality_signed_clamp(after.validity - before.validity),
+            quality_signed_clamp(after.boundary - before.boundary),
+            quality_signed_clamp(after.coverage - before.coverage),
+            quality_signed_clamp(after.diversity - before.diversity),
+            quality_signed_clamp(after.smoothness - before.smoothness),
+            quality_signed_clamp(after.stability - before.stability),
+            quality_signed_clamp(after.topology - before.topology));
+    thermo_json_string(f, quality_profile().focus);
+    fputc('}', f);
 }
 
 static double quality_reward(QualityMetrics before, QualityMetrics after,
                              int accepted, int rejected) {
     if (accepted < 0) accepted = 0;
     if (rejected < 0) rejected = 0;
-    double improvement = after.total - before.total;
+    QualityProfile profile = quality_profile();
+    double improvement = profile.validity * (after.validity - before.validity) +
+                         profile.boundary * (after.boundary - before.boundary) +
+                         profile.coverage * (after.coverage - before.coverage) +
+                         profile.diversity * (after.diversity - before.diversity) +
+                         profile.smoothness * (after.smoothness - before.smoothness) +
+                         profile.stability * (after.stability - before.stability) +
+                         profile.topology * (after.topology - before.topology);
+    improvement = 0.75 * improvement + 0.25 * (after.total - before.total);
     double acceptance = accepted / (double)(accepted + rejected + 1);
     double penalty = rejected > 0 ? 0.08 * rejected : 0.0;
     return quality_signed_clamp(2.0 * improvement + 0.20 * acceptance - penalty);
@@ -1245,6 +1542,13 @@ static RGB scalec(RGB c, double f) {
              (uint8_t)(c.g * f > 255 ? 255 : c.g * f < 0 ? 0 : c.g * f),
              (uint8_t)(c.b * f > 255 ? 255 : c.b * f < 0 ? 0 : c.b * f)};
     return o;
+}
+static RGB quality_heat_tint(RGB base, double score) {
+    score = quality_clamp(score);
+    RGB tint = score < 0.45 ? (RGB){255, 64, 76} :
+               score < 0.75 ? (RGB){255, 190, 64} : (RGB){82, 214, 190};
+    double amount = (1.0 - score) * 0.72;
+    return lerp(base, tint, amount);
 }
 static const RGB C_AMBER = {245, 158, 11}, C_SKY = {56, 189, 248}, C_BG = {11, 14, 20};
 
@@ -1698,6 +2002,7 @@ static void render_help(void) {
         "  i       isometric view       , .    scrub time\n",
         "  T       thermo solver        R     reset thermo learning\n",
         "  l       quality observatory   P     pin/unpin hovered cell\n",
+        "  Q       quality heatmap      E     evolve/rank seed variants\n",
         "  wasd    hero walk\n",
         "  n       zen: worlds morph    q     quit",
         "",
@@ -2481,6 +2786,8 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                                 fb_fg(gc);
                             }
                         }
+                        if (g_heatmap && !(studio_pin_ && studio_pin_[IDX(wx, cy)]))
+                            col = quality_heat_tint(col, quality_local_cell_score(wx, cy, NULL));
                         if (bits) fb_fg(col);
                         fb_braille(bits);
                         if (studio_pin_ && studio_pin_[IDX(wx, cy)] && chi == 0 && sub == 0) {
@@ -2542,6 +2849,8 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                             base = (RGB){255, 220, 100};
                             sh = 1.0;
                         }
+                        if (g_heatmap && !(studio_pin_ && studio_pin_[IDX(wx, cy)]))
+                            base = quality_heat_tint(base, quality_local_cell_score(wx, cy, NULL));
                         fb_half(scalec(base, (0.92 + h1 * 0.00016) * pulse * sh),
                                 scalec(base, (0.92 + h2 * 0.00016) * pulse * sh));
                     } else {
@@ -4323,6 +4632,17 @@ static bool thermo_launch(void) {
             g_torus ? "true" : "false", g_smooth ? "true" : "false", g_thermo_form,
             g_thermo_learn ? "true" : "false");
     thermo_json_string(thermo_in_, profile.focus);
+    fputs(",\"quality_weights\":{", thermo_in_);
+    fprintf(thermo_in_, "\"validity\":%.9g,\"boundary\":%.9g,\"coverage\":%.9g,"
+                     "\"diversity\":%.9g,\"smoothness\":%.9g,\"stability\":%.9g,"
+                     "\"topology\":%.9g},\"quality_priors\":[",
+            profile.validity, profile.boundary, profile.coverage, profile.diversity,
+            profile.smoothness, profile.stability, profile.topology);
+    for (int i = 0; i < ntiles_; i++)
+        fprintf(thermo_in_, "%s%.9g", i ? "," : "", quality_tile_prior(i));
+    fputs("],\"macro_name\":", thermo_in_);
+    thermo_json_string(thermo_in_, macro_name());
+    fprintf(thermo_in_, ",\"macro_guided_cells\":%d", macro_guided_cells());
     fputs(",\"unary\":[", thermo_in_);
     for (int i = 0; i < ntiles_; i++)
         fprintf(thermo_in_, "%s%.9g", i ? "," : "", tiles_[i].weight);
@@ -4413,10 +4733,13 @@ static bool thermo_send_feedback(const int *cells, const int *tiles, int count,
     thermo_quality_ = after.total;
     fprintf(thermo_in_, "{\"v\":1,\"t\":\"feedback\",\"reward\":%.9g,"
                      "\"quality\":%.9g,\"accepted\":%d,\"rejected\":%d,"
-                     "\"contradictions\":%d,\"quality_focus\":\"%s\","
-                     "\"metrics\":",
-            reward, after.total, accepted, rejected, contradictions, profile.focus);
+                     "\"contradictions\":%d,\"quality_focus\":",
+            reward, after.total, accepted, rejected, contradictions);
+    thermo_json_string(thermo_in_, profile.focus);
+    fputs(",\"metrics\":", thermo_in_);
     quality_json(thermo_in_, after);
+    fputs(",\"metrics_delta\":", thermo_in_);
+    quality_delta_json(thermo_in_, before, after);
     fputs(",\"tile_events\":[", thermo_in_);
     for (int i = 0; i < count; i++)
         fprintf(thermo_in_, "%s{\"index\":%d,\"value\":%.3g}",
@@ -4716,7 +5039,7 @@ static bool save_report(const char *path) {
     quality_record(q);
     FILE *f = fopen(path, "w");
     if (!f) return false;
-    fprintf(f, "{\"schema\":1,\"mode\":\"%s\",\"seed\":%llu,"
+    fprintf(f, "{\"schema\":2,\"mode\":\"%s\",\"seed\":%llu,"
                "\"dimensions\":{\"w\":%d,\"h\":%d},\"solver\":\"%s\","
                "\"quality\":",
             MODES[g_mode_idx], (unsigned long long)g_seed, W_, H_,
@@ -4728,10 +5051,18 @@ static bool save_report(const char *path) {
     fprintf(f, ",\"round\":%ld,\"observations\":%ld,\"proposals\":%ld,"
                "\"accepted\":%ld,\"rejected\":%ld,\"contradictions\":%ld,"
                "\"beta\":%.9g,\"confidence\":%.9g},"
-               "\"studio\":{\"pins\":%d}}\n",
+               "\"studio\":{\"pins\":%d},\"macro\":{\"name\":",
             thermo_round_, thermo_observations_, thermo_proposals_,
             thermo_accepts_, thermo_rejects_, thermo_contradictions_,
             thermo_beta_, thermo_confidence_, studio_pin_count_);
+    thermo_json_string(f, macro_name());
+    fprintf(f, ",\"guided_cells\":%d},\"evolution\":{\"candidates\":%d,"
+               "\"winner_seed\":%llu,\"scores\":[",
+            macro_guided_cells(), g_evolution_n,
+            (unsigned long long)g_evolution_winner_seed);
+    for (int i = 0; i < g_evolution_n; i++)
+        fprintf(f, "%s%.9g", i ? "," : "", quality_clamp(g_evolution_scores[i]));
+    fputs("]}}\n", f);
     bool ok = ferror(f) == 0 && fclose(f) == 0;
     if (!ok) return false;
     return true;
@@ -4740,6 +5071,7 @@ static bool save_report(const char *path) {
 static void render_observatory(void) {
     QualityMetrics q = quality_measure(false);
     QualityProfile profile = quality_profile();
+    QualityHotspot hotspot = quality_hotspot();
     const double *live[] = {
         &g_quality_live, &g_quality_validity_live, &g_quality_boundary_live,
         &g_quality_coverage_live, &g_quality_diversity_live,
@@ -4769,9 +5101,13 @@ static void render_observatory(void) {
              g_thermo ? "thermo" : "classic", thermo_sampler_,
              g_thermo_learn ? "on" : "off", thermo_beta_, thermo_confidence_);
     fb_puts(line);
-    snprintf(line, sizeof line, "round %ld  observations %ld  proposals %ld  accepted %ld  rejected %ld  contradictions %ld\n\n",
+    snprintf(line, sizeof line, "round %ld  observations %ld  proposals %ld  accepted %ld  rejected %ld  contradictions %ld\n",
              thermo_round_, thermo_observations_, thermo_proposals_, thermo_accepts_,
              thermo_rejects_, thermo_contradictions_);
+    fb_puts(line);
+    snprintf(line, sizeof line, "macro %-16s guided %d  hotspot (%d,%d) score %.3f reason %s\n\n",
+             macro_name(), macro_guided_cells(), hotspot.x, hotspot.y,
+             hotspot.score, hotspot.reason);
     fb_puts(line);
     for (int i = 0; i < 8; i++) {
         double value = *live[i] >= 0.0 ? *live[i] : current[i];
@@ -4799,8 +5135,39 @@ static void render_observatory(void) {
     }
     fb_puts("\n\n");
     fb_fg((RGB){150, 180, 205});
-    fb_puts("l return   P pin/unpin hover   right-click unpin   h help   q quit\n");
+    fb_puts("l return   Q heatmap   E evolution   P pin/unpin hover   right-click unpin   h help   q quit\n");
     fb_puts("report: use --report FILE.json for reproducible quality + thermo + studio data");
+    fb_puts("\x1b[0m");
+    frame_begin();
+    fwrite(fb_, 1, fblen_, stdout);
+    frame_end();
+}
+
+static void render_evolution_lab(void) {
+    QualityHotspot hotspot = quality_hotspot();
+    char line[256];
+    fb_reset();
+    fb_puts("\x1b[H\x1b[2J");
+    fb_fg((RGB){255, 210, 130});
+    fb_puts("EVOLUTION LAB\n\n");
+    fb_fg((RGB){220, 225, 235});
+    snprintf(line, sizeof line, "mode %-10s  focus %-10s  base seed %llu\n",
+             MODES[g_mode_idx], quality_profile().focus,
+             (unsigned long long)g_evolution_winner_seed);
+    fb_puts(line);
+    snprintf(line, sizeof line, "winner quality %.3f  hotspot (%d,%d) %s %.3f\n\n",
+             g_evolution_n > 0 ? g_evolution_scores[0] : g_quality_live,
+             hotspot.x, hotspot.y, hotspot.reason, hotspot.score);
+    fb_puts(line);
+    fb_puts("rank  seed                 quality\n");
+    for (int i = 0; i < g_evolution_n; i++) {
+        snprintf(line, sizeof line, " %2d   %-20llu  %.4f%s\n", i + 1,
+                 (unsigned long long)g_evolution_seeds[i],
+                 quality_clamp(g_evolution_scores[i]),
+                 i == 0 ? "  <- winner" : "");
+        fb_puts(line);
+    }
+    fb_puts("\nE return   Q heatmap   l observatory   P pin/unpin   q quit");
     fb_puts("\x1b[0m");
     frame_begin();
     fwrite(fb_, 1, fblen_, stdout);
@@ -5040,7 +5407,7 @@ static bool studio_pin_cell(int cx, int cy) {
     if (studio_pin_[cell]) return studio_unpin_cell(cx, cy);
     uint64_t domain = dom_[cell];
     if (!domain || !undo_push()) return false;
-    int tile = pc64(domain) == 1 ? __builtin_ctzll(domain) : weighted_pick(domain);
+    int tile = pc64(domain) == 1 ? __builtin_ctzll(domain) : weighted_pick_at(domain, cell);
     dom_[cell] = 1ULL << tile;
     if (!propagate_from(cell)) {
         (void)undo_pop();
@@ -5117,12 +5484,148 @@ static void handle_click(int btn, int px, int py) {
     /* left-click: force collapse */
     if (pc64(dom_[cell]) <= 1) return;
     if (!undo_push()) { set_note("undo unavailable"); return; }
-    dom_[cell] = 1ULL << weighted_pick(dom_[cell]);
+    dom_[cell] = 1ULL << weighted_pick_at(dom_[cell], cell);
     if (propagate_from(cell)) { set_note("seeded (%d,%d)", cx, cy); if (g_sound) { ensure_sfx(); play_sfx("/tmp/wfc_blip.wav"); } }
     else {
         undo_pop();
         set_note("collapse refused there");
     }
+}
+
+static uint64_t evolution_seed(uint64_t base, int index) {
+    if (index == 0) return base;
+    uint64_t x = base + 0x9E3779B97F4A7C15ULL * (uint64_t)(index + 1);
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+static bool evolution_replay_pins(const uint8_t *pins, const uint8_t *pin_tiles) {
+    size_t cells = (size_t)W_ * H_;
+    memset(studio_pin_, 0, cells);
+    memset(studio_tile_, 0, cells);
+    studio_pin_count_ = 0;
+    for (size_t i = 0; i < cells; i++) {
+        if (!pins[i]) continue;
+        int tile = pin_tiles[i];
+        uint64_t mask = tile >= 0 && tile < ntiles_ ? 1ULL << tile : 0;
+        if (!mask || !(dom_[i] & mask)) return false;
+        dom_[i] = mask;
+        if (!propagate_from((int)i)) return false;
+        studio_pin_[i] = 1;
+        studio_tile_[i] = (uint8_t)tile;
+        studio_pin_count_++;
+    }
+    g_decided = 0;
+    for (size_t i = 0; i < cells; i++) g_decided += pc64(dom_[i]) == 1;
+    return true;
+}
+
+static bool evolution_run(int requested) {
+    if (W_ <= 0 || H_ <= 0 || !dom_ || g_nworlds != 1 || g_inf || g_thermo)
+        return false;
+    if (requested < 2) requested = 2;
+    if (requested > EVOLUTION_MAX) requested = EVOLUTION_MAX;
+    size_t cells = (size_t)W_ * H_;
+    uint64_t *base_dom = malloc(sizeof(uint64_t) * cells);
+    uint64_t *best_dom = malloc(sizeof(uint64_t) * cells);
+    uint8_t *base_pin = malloc(cells), *base_tile = malloc(cells);
+    uint8_t *best_pin = malloc(cells), *best_tile = malloc(cells);
+    if (!base_dom || !best_dom || !base_pin || !base_tile || !best_pin || !best_tile) {
+        free(base_dom); free(best_dom); free(base_pin); free(base_tile);
+        free(best_pin); free(best_tile);
+        set_note("evolution memory unavailable");
+        return false;
+    }
+    memcpy(base_dom, dom_, sizeof(uint64_t) * cells);
+    memcpy(base_pin, studio_pin_, cells);
+    memcpy(base_tile, studio_tile_, cells);
+    g_evolution_n = requested;
+    uint64_t base_seed = g_seed;
+    bool found = false;
+    QualityMetrics best_quality = {0};
+    for (int candidate = 0; candidate < requested; candidate++) {
+        uint64_t seed = evolution_seed(base_seed, candidate);
+        g_evolution_seeds[candidate] = seed;
+        g_evolution_scores[candidate] = -1.0;
+        bool solved = false;
+        for (int attempt = 0; attempt < 80 && !solved; attempt++) {
+            g_seed = seed;
+            rs_ = seed ^ 0xD1B54A32D192ED03ULL ^
+                   (uint64_t)attempt * 0xA24BAED4963EE407ULL;
+            grid_reset();
+            if (!evolution_replay_pins(base_pin, base_tile)) continue;
+            long limit = (long)cells * 12 + 96;
+            for (long step = 0; step < limit; step++) {
+                int result = wfc_step();
+                if (result == 1) { solved = true; break; }
+                if (result < 0) break;
+            }
+        }
+        if (!solved) continue;
+        QualityMetrics quality = quality_measure(true);
+        g_evolution_scores[candidate] = quality.total;
+        bool better = !found || quality.total > best_quality.total + 1e-12 ||
+                      (fabs(quality.total - best_quality.total) <= 1e-12 &&
+                       quality.validity > best_quality.validity + 1e-12) ||
+                      (fabs(quality.total - best_quality.total) <= 1e-12 &&
+                       fabs(quality.validity - best_quality.validity) <= 1e-12 &&
+                       quality.boundary > best_quality.boundary);
+        if (better) {
+            found = true;
+            best_quality = quality;
+            memcpy(best_dom, dom_, sizeof(uint64_t) * cells);
+            memcpy(best_pin, studio_pin_, cells);
+            memcpy(best_tile, studio_tile_, cells);
+        }
+    }
+    if (!found) {
+        g_seed = base_seed;
+        memcpy(dom_, base_dom, sizeof(uint64_t) * cells);
+        memcpy(studio_pin_, base_pin, cells);
+        memcpy(studio_tile_, base_tile, cells);
+        studio_pin_count_ = 0;
+        for (size_t i = 0; i < cells; i++) studio_pin_count_ += studio_pin_[i] != 0;
+        macro_build();
+        free(base_dom); free(best_dom); free(base_pin); free(base_tile);
+        free(best_pin); free(best_tile);
+        return false;
+    }
+    /* Put the best candidate first so the overlay and report can be read at a
+     * glance, while retaining every score for comparison. */
+    for (int i = 0; i < requested; i++) {
+        int best = i;
+        for (int j = i + 1; j < requested; j++)
+            if (g_evolution_scores[j] > g_evolution_scores[best] + 1e-12)
+                best = j;
+        if (best != i) {
+            uint64_t seed = g_evolution_seeds[i];
+            double score = g_evolution_scores[i];
+            g_evolution_seeds[i] = g_evolution_seeds[best];
+            g_evolution_scores[i] = g_evolution_scores[best];
+            g_evolution_seeds[best] = seed;
+            g_evolution_scores[best] = score;
+        }
+    }
+    g_evolution_winner_seed = g_evolution_seeds[0];
+    g_seed = g_evolution_winner_seed;
+    rs_ = g_seed ^ 0xD1B54A32D192ED03ULL;
+    memcpy(dom_, best_dom, sizeof(uint64_t) * cells);
+    memcpy(studio_pin_, best_pin, cells);
+    memcpy(studio_tile_, best_tile, cells);
+    studio_pin_count_ = 0;
+    for (size_t i = 0; i < cells; i++) studio_pin_count_ += studio_pin_[i] != 0;
+    g_decided = 0;
+    for (size_t i = 0; i < cells; i++) g_decided += pc64(dom_[i]) == 1;
+    macro_build();
+    hist_clear();
+    g_comp_ready = false;
+    quality_record(best_quality);
+    full_repaint_ = true;
+    free(base_dom); free(best_dom); free(base_pin); free(base_tile);
+    free(best_pin); free(best_tile);
+    set_note("evolution winner %.3f from %d candidates", best_quality.total, requested);
+    return true;
 }
 
 static int pump_keys(bool tty) {
@@ -5199,6 +5702,31 @@ static int pump_keys(bool tty) {
             } else if (c == 'q' || c == 3) {
                 g_observe = false;
                 req = req == 1 ? 1 : 2;
+            } else if (c == 'Q') {
+                g_observe = false;
+                g_paused = g_observe_was_paused;
+                g_heatmap = !g_heatmap;
+                full_repaint_ = true;
+                set_note("quality heatmap %s", g_heatmap ? "ON" : "off");
+            } else if (c == 'E') {
+                g_observe = false;
+                g_paused = true;
+                if (g_thermo) set_note("evolution: turn thermo off first");
+                else if (evolution_run(4)) g_evolve_view = true;
+            }
+            continue;
+        }
+        if (g_evolve_view) {
+            if (c == 'E') {
+                g_evolve_view = false;
+                g_paused = g_evolve_was_paused;
+                full_repaint_ = true;
+            } else if (c == 'Q') {
+                g_heatmap = !g_heatmap;
+                set_note("quality heatmap %s", g_heatmap ? "ON" : "off");
+            } else if (c == 'q' || c == 3) {
+                g_evolve_view = false;
+                req = req == 1 ? 1 : 2;
             }
             continue;
         }
@@ -5209,6 +5737,21 @@ static int pump_keys(bool tty) {
             g_observe = true;
             full_repaint_ = true;
             continue;
+        }
+        if (c == 'Q') {
+            g_heatmap = !g_heatmap;
+            full_repaint_ = true;
+            set_note("quality heatmap %s", g_heatmap ? "ON" : "off");
+        }
+        if (c == 'E') {
+            if (g_nworlds > 1 || g_inf || g_thermo) {
+                set_note("evolution: classic single-world only");
+            } else {
+                g_evolve_was_paused = g_paused;
+                g_paused = true;
+                if (evolution_run(4)) g_evolve_view = true;
+                else g_paused = g_evolve_was_paused;
+            }
         }
         if (c == 'q' || c == 3) req = req == 1 ? 1 : 2;
         else if (c == ' ') { g_seed = rnd(); req = 1; }
@@ -5685,6 +6228,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--twin")) { g_twin = true; g_nworlds = 2; }
         else if (!strcmp(argv[i], "--quad")) { g_quad = true; g_twin = false; g_nworlds = 4; }
         else if (!strcmp(argv[i], "--bench")) g_bench = true;
+        else if (!strcmp(argv[i], "--evolve")) {
+            long value;
+            const char *v = NEXTV();
+            if (!parse_long_range(v, 2, EVOLUTION_MAX, &value)) {
+                fprintf(stderr, "invalid value for --evolve: %s (expected 2-%d)\n",
+                        v, EVOLUTION_MAX);
+                return 2;
+            }
+            g_evolve_count = (int)value;
+        }
         else if (!strcmp(argv[i], "--infinite")) { g_inf = true; g_once = false; }
         else if (!strcmp(argv[i], "--no-bloom")) g_no_bloom = true;
         else if (!strcmp(argv[i], "--no-weather")) g_no_weather = true;
@@ -5709,7 +6262,7 @@ int main(int argc, char **argv) {
             snprintf(g_report_path, sizeof g_report_path, "%s", report);
         }
         else if (!strcmp(argv[i], "--gif")) { snprintf(g_gif_path, sizeof g_gif_path, "%s", NEXTV()); g_gif_on = 1; }
-        else if (!strcmp(argv[i], "--version")) { printf("wfc 5.2 \u2014 twenty-five worlds\n"); return 0; }
+        else if (!strcmp(argv[i], "--version")) { printf("wfc 5.3 \u2014 quality evolution studio\n"); return 0; }
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             printf("wave function collapse, animated in your terminal\n\n"
                    "  --mode circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium|delta  tileset\n"
@@ -5734,6 +6287,7 @@ int main(int argc, char **argv) {
                    "  --link wfc://mode/seed           replay a shared world\n"
                    "  --pan                            drift the camera after solving\n"
                    "  --bench                          performance table across modes\n"
+                   "  --evolve N                       rank 2-8 deterministic seed variants\n"
                    "  --twin / --quad                  two or four worlds at once\n"
                    "  --infinite                       ever-growing world (toroidal modes)\n"
                    "  --zoom N                         export/pixel scale 1-6\n"
@@ -5744,7 +6298,7 @@ int main(int argc, char **argv) {
                    "  --once                           exit after first map\n\n"
                    "keys: space new | m mode | y theme | c cycle | a audio | h help\n"
                    "      i iso | , . scrub collapse | wasd hero in dungeon\n"
-                   "      l observatory | P pin/unpin hover | click=seed right-click=carve\n"
+                   "      l observatory | Q heatmap | E evolution | P pin/unpin hover\n"
                    "      +/- speed p pause g gif s save q quit\n"
                    "build: cc -O2 -std=c11 -o wfc wfc.c -lz\n");
             return 0;
@@ -5758,6 +6312,11 @@ int main(int argc, char **argv) {
     }
     if (g_thermo && (g_nworlds > 1 || g_inf)) {
         fprintf(stderr, "--solver thermo cannot be combined with --twin, --quad, or --infinite\n");
+        return 2;
+    }
+    if (g_evolve_count && (g_thermo || g_nworlds > 1 || g_inf ||
+                           g_gallery_path[0] || g_collage_path[0] || g_bench)) {
+        fprintf(stderr, "--evolve requires a classic single-world solve (use E live)\n");
         return 2;
     }
 
@@ -5853,7 +6412,21 @@ int main(int argc, char **argv) {
     /* headless solve */
     if (!tty) {
         long total = 0; int tries = 0, done = 0;
-        for (; tries < 10000 && !done; tries++) {
+        if (g_evolve_count) {
+            if (!evolution_run(g_evolve_count)) {
+                fprintf(stderr, "evolution: no valid candidate\n");
+                return 1;
+            }
+            tries = 1;
+            total = W_ * H_;
+            done = 1;
+            printf("evolution candidates=%d winner_seed=%llu quality=%.3f focus=%s scores=",
+                   g_evolution_n, (unsigned long long)g_evolution_winner_seed,
+                   quality_clamp(g_evolution_scores[0]), quality_profile().focus);
+            for (int i = 0; i < g_evolution_n; i++)
+                printf("%s%.3f", i ? "," : "", quality_clamp(g_evolution_scores[i]));
+            putchar('\n');
+        } else for (; tries < 10000 && !done; tries++) {
             grid_reset(); frames_clear(); long s = 0;
             long cap_every = W_ * H_ > 120 ? W_ * H_ / 120 : 1;
             if (g_thermo) {
@@ -5989,6 +6562,7 @@ inf_continue:
             if (req == 1) break;
             if (g_help) { if (!g_gfx) render_help(); msleep(50); continue; }
             if (g_observe) { if (!g_gfx) render_observatory(); msleep(80); continue; }
+            if (g_evolve_view) { if (!g_gfx) render_evolution_lab(); msleep(80); continue; }
             if (g_sheet_opened && !g_gfx) { render_sheet(); msleep(500); continue; }
             if (g_paused) { if (!g_gfx) render_frame(steps, attempts, 1.0); msleep(40); continue; }
             if (g_nworlds > 1) {
@@ -6184,7 +6758,7 @@ inf_continue:
     free(prev_sig_);
     free(ghost_);
     free(g_frames);
-    free(river_); free(river_rank_); free(comp_); free(comp_col_);
+    free(river_); free(river_rank_); free(comp_); free(comp_col_); free(macro_role_);
     free(thermo_lbuf);
     free(gif_kids);
     free(snap_);

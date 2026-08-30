@@ -40,12 +40,21 @@ class QualityStudioTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(report.read_text(encoding="utf-8"))
-            self.assertEqual(payload["schema"], 1)
+            self.assertEqual(payload["schema"], 2)
             self.assertEqual(payload["mode"], "delta")
             self.assertEqual(payload["seed"], 7)
             self.assertEqual(payload["dimensions"], {"w": 8, "h": 6})
             self.assertEqual(payload["solver"], "classic")
             self.assertEqual(payload["quality"]["focus"], "delta")
+            self.assertEqual(set(payload["quality"]["profile_weights"]), {
+                "validity", "boundary", "coverage", "diversity", "smoothness",
+                "stability", "topology",
+            })
+            hotspot = payload["quality"]["hotspot"]
+            self.assertIn(hotspot["reason"], {"entropy", "boundary", "coverage",
+                                                "branch", "validity", "balanced"})
+            self.assertGreaterEqual(hotspot["score"], 0.0)
+            self.assertLessEqual(hotspot["score"], 1.0)
             for key in ("total", "validity", "boundary", "coverage", "diversity",
                         "smoothness", "stability", "topology"):
                 self.assertIn(key, payload["quality"])
@@ -55,6 +64,20 @@ class QualityStudioTests(unittest.TestCase):
                         "accepted", "rejected", "contradictions"):
                 self.assertIn(key, payload["thermo"])
             self.assertEqual(payload["studio"]["pins"], 0)
+            self.assertEqual(payload["macro"]["name"], "delta-channel")
+            self.assertGreater(payload["macro"]["guided_cells"], 0)
+            self.assertEqual(payload["evolution"]["candidates"], 0)
+
+    def test_evolution_lab_is_reproducible_and_reports_a_winner(self):
+        args = ("--mode", "delta", "--seed", "7", "--w", "8", "--h", "6",
+                "--once", "--evolve", "3")
+        first = self.run_wfc(*args)
+        second = self.run_wfc(*args)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(first.stdout, second.stdout)
+        self.assertIn("evolution candidates=3", first.stdout)
+        self.assertRegex(first.stdout, r"winner_seed=\d+ quality=0\.\d+")
 
     def test_debug_quality_identifies_delta_profile(self):
         result = self.run_wfc(
@@ -71,6 +94,9 @@ class QualityStudioTests(unittest.TestCase):
         self.assertIn("--report FILE", result.stdout)
         self.assertIn("l observatory", result.stdout)
         self.assertIn("P pin", result.stdout)
+        self.assertIn("Q heatmap", result.stdout)
+        self.assertIn("E evolution", result.stdout)
+        self.assertIn("--evolve N", result.stdout)
 
 
 if __name__ == "__main__":
