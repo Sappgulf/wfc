@@ -243,7 +243,7 @@ Run make learning-check and confirm a zero exit status.
 Extend the headless regression recipe with a deterministic debug run:
 
 ~~~make
-debug_quality=$$(WFC_DEBUG=1 ./wfc --mode streets --seed 7 --w 8 --h 6 --once 2>&1 >/dev/null); \
+debug_quality=$$(WFC_DEBUG=1 ./wfc --mode streets --seed 7 --w 8 --h 6 --once 2>&1); \
 echo "$$debug_quality" | grep -q 'quality=';
 ~~~
 

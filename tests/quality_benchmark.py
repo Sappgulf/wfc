@@ -16,14 +16,16 @@ SOLVERS = ("classic", "thermo-ephemeral", "thermo-learned")
 def run_case(binary, mode, solver, trial, width, height, profile_dir):
     seed = 7001 + trial * 7919 + MODES.index(mode) * 101
     report = Path(profile_dir) / ("report-%s-%s-%d.json" % (mode, solver, trial))
+    run_profile = Path(profile_dir) / mode / solver / ("trial-%d" % trial)
     args = [
         str(binary), "--mode", mode, "--seed", str(seed),
         "--w", str(width), "--h", str(height), "--once",
-        "--report", str(report), "--solver", "classic",
+        "--report", str(report), "--solver",
+        "classic" if solver == "classic" else "thermo",
     ]
     if solver != "classic":
-        args[args.index("classic")] = "thermo"
-        args.extend(["--thermo-profile", str(profile_dir)])
+        run_profile.mkdir(parents=True, exist_ok=True)
+        args.extend(["--thermo-profile", str(run_profile)])
     if solver == "thermo-ephemeral":
         args.append("--no-learn")
     started = time.monotonic()

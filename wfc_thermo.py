@@ -75,7 +75,7 @@ MAX_CHAINS = 1_024
 MAX_EDGE_BYTES = 256 * 1024 * 1024
 MAX_CHAIN_STATES = 64 * 1024 * 1024
 MAX_SCAN_STATES = 64 * 1024 * 1024
-MAX_PROTOCOL_LINE = 8 * 1024 * 1024
+MAX_PROTOCOL_LINE = 32 * 1024 * 1024
 MAX_FEEDBACK_EVENTS = 512
 U64_MASK = (1 << 64) - 1
 
@@ -930,6 +930,8 @@ class ThermoSession:
     def sample(self, command):
         if self.spec is None:
             raise ValueError("sample received before init")
+        if self.pending is not None:
+            raise ValueError("sample received before the pending proposal was resolved")
         domains = _domain_values(command.get("domains"),
                                  self.spec["w"] * self.spec["h"],
                                  self.spec["ntiles"])
@@ -975,6 +977,8 @@ class ThermoSession:
     def feedback(self, command):
         if self.spec is None:
             raise ValueError("feedback received before init")
+        if self.pending is None:
+            raise ValueError("feedback received without a pending proposal")
         reward = float(command.get("reward", 0.0))
         if not math.isfinite(reward):
             raise ValueError("feedback reward is not finite")
@@ -1058,6 +1062,8 @@ class ThermoSession:
     def finish(self, command):
         if self.spec is None:
             raise ValueError("finish received before init")
+        if self.pending is not None:
+            raise ValueError("finish received before the pending proposal was resolved")
         raw = command.get("domains")
         if raw is not None:
             domains = _domain_values(raw, self.spec["w"] * self.spec["h"], self.spec["ntiles"])

@@ -138,6 +138,11 @@ class ProtocolContractTests(unittest.TestCase):
             send(proc, payload)
             ready = read_event(proc)
             self.assertEqual(ready["t"], "ready")
+            domains = [3] * 6
+            send(proc, {"v": 1, "t": "sample", "domains": domains,
+                        "budget": 4, "beta_target": 2.0})
+            self.assertEqual(read_event(proc)["t"], "stats")
+            self.assertEqual(read_event(proc)["t"], "proposal")
             send(proc, {"v": 1, "t": "feedback", "reward": 0.1,
                         "accepted": 1, "rejected": 0, "contradictions": 0,
                         "tile_events": [], "pair_events": [], "context_events": [],
@@ -223,6 +228,30 @@ class ProtocolContractTests(unittest.TestCase):
                     "budget": 4, "beta_target": 2.0})
         self.assertEqual(read_event(proc)["t"], "done")
 
+    def test_incremental_commands_require_proposal_order(self):
+        proc = self.launch_worker(REAL_WORKER)
+        send(proc, init_payload())
+        self.assertEqual(read_event(proc)["t"], "ready")
+        send(proc, {"v": 1, "t": "feedback", "reward": 0.0,
+                    "tile_events": [], "pair_events": [], "context_events": []})
+        self.assertEqual(read_event(proc)["t"], "fatal")
+        self.assertEqual(proc.wait(timeout=2), 1)
+        self.close_process(proc)
+
+        proc = self.launch_worker(REAL_WORKER)
+        domains = [3] * 6
+        send(proc, init_payload(domains))
+        self.assertEqual(read_event(proc)["t"], "ready")
+        send(proc, {"v": 1, "t": "sample", "domains": domains,
+                    "budget": 4, "beta_target": 2.0})
+        self.assertEqual(read_event(proc)["t"], "stats")
+        self.assertEqual(read_event(proc)["t"], "proposal")
+        send(proc, {"v": 1, "t": "sample", "domains": domains,
+                    "budget": 4, "beta_target": 2.0})
+        self.assertEqual(read_event(proc)["t"], "fatal")
+        self.assertEqual(proc.wait(timeout=2), 1)
+        self.close_process(proc)
+
     def test_feedback_event_batches_are_bounded(self):
         proc = self.launch_worker(REAL_WORKER)
         send(proc, init_payload())
@@ -237,7 +266,7 @@ class ProtocolContractTests(unittest.TestCase):
 
     def test_protocol_frames_are_bounded(self):
         proc = self.launch_worker(REAL_WORKER)
-        proc.stdin.write(("{" + "x" * (8 * 1024 * 1024) + "}\n").encode("ascii"))
+        proc.stdin.write(("{" + "x" * (32 * 1024 * 1024 + 1) + "}\n").encode("ascii"))
         proc.stdin.flush()
         self.assertEqual(read_event(proc)["t"], "fatal")
         self.assertEqual(proc.wait(timeout=2), 1)

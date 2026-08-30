@@ -4739,11 +4739,10 @@ static void ensure_sfx(void) {
     }
     write_wav("/tmp/wfc_blip.wav", blip, 2600);
     /* per-world stingers */
-    static const char *names[NMODES] = {"circuit","terrain","truchet","fire","waves","dungeon","maze","galaxy","city","aurora","matrix","pipes","mondrian","koi","lava","sakura","geode","lantern","dunes","reef","stained","streets","neurons","mycelium","delta"};
     for (int mi2 = 0; mi2 < NMODES; mi2++) {
         static float st[44100 / 2];
         for (int i = 0; i < 22050; i++) st[i] = 0;
-        float seq[NMODES][6][2] = {   /* {freq, startSeconds} pairs, 0-terminated */
+        float seq[][6][2] = {   /* {freq, startSeconds} pairs, 0-terminated */
             {{523,0},{659,0.09},{784,0.18},{1046,0.27},{0,0}},
             {{392,0},{440,0.11},{494,0.22},{587,0.33},{0,0}},
             {{440,0},{554,0.1},{440,0.2},{554,0.3},{0,0}},
@@ -4770,9 +4769,12 @@ static void ensure_sfx(void) {
             {{147,0},{196,0.14},{247,0.28},{330,0.42},{0,0}},
             {{196,0},{247,0.12},{294,0.24},{392,0.36},{0,0}},
         };
-        for (int nn2 = 0; nn2 < 5 && seq[mi2][nn2][0] > 0; nn2++) {
-            int start = (int)(seq[mi2][nn2][1] * SR);
-            float fr = seq[mi2][nn2][0];
+        const size_t stinger_seed_count = sizeof seq / sizeof seq[0];
+        const size_t tone_row = (size_t)mi2 % stinger_seed_count;
+        const float (*tones)[2] = seq[tone_row];
+        for (int nn2 = 0; nn2 < 5 && tones[nn2][0] > 0; nn2++) {
+            int start = (int)(tones[nn2][1] * SR);
+            float fr = tones[nn2][0];
             for (int i = start; i < 22050; i++) {
                 double t2 = (double)(i - start) / SR;
                 float env = (float)exp(-t2 * 9.0) * (t2 < 0.01 ? t2 * 100 : 1);
@@ -4780,7 +4782,7 @@ static void ensure_sfx(void) {
             }
         }
         char p2[64];
-        snprintf(p2, sizeof p2, "/tmp/wfx_st_%s.wav", names[mi2]);
+        snprintf(p2, sizeof p2, "/tmp/wfx_st_%s.wav", MODESPEC[mi2].name);
         write_wav(p2, st, 22050);
     }
     g_sfx_ready = true;
@@ -4788,6 +4790,8 @@ static void ensure_sfx(void) {
 static void play_sfx(const char *path);
 static void play_stinger(int mode_idx) {
     if (!g_sound) return;
+    if (mode_idx < 0 || mode_idx >= NMODES) mode_idx = g_mode_idx;
+    if (mode_idx < 0 || mode_idx >= NMODES) return;
     ensure_sfx();
     char p[96];
     snprintf(p, sizeof p, "/tmp/wfx_st_%s.wav", MODESPEC[mode_idx].name);
@@ -4812,6 +4816,8 @@ static void ambient_stop(void) {
 }
 
 static void ensure_ambient(int mi) {
+    if (mi < 0 || mi >= NMODES) mi = g_mode_idx;
+    if (mi < 0 || mi >= NMODES) return;
     char p[96];
     snprintf(p, sizeof p, "/tmp/wfx_amb_%s.wav", MODESPEC[mi].name);
     FILE *probe = fopen(p, "rb");
@@ -4821,13 +4827,14 @@ static void ensure_ambient(int mi) {
     float *s = malloc(sizeof(float) * (size_t)n);
     if (!s) return;
     /* pentatonic-ish roots so adjacent modes drift musically */
-    static const float roots[NMODES] = {
+    static const float roots[] = {
         110.0f, 98.0f, 164.8f, 87.3f, 73.4f, 61.7f, 82.4f, 130.8f,
         73.4f, 110.0f, 92.5f, 87.3f, 123.5f, 98.0f, 61.7f,
         116.5f, 146.8f, 82.4f, 87.3f, 98.0f, 110.0f, 98.0f, 220.0f, 73.4f,
         82.4f,
     };
-    double f = roots[mi];
+    const size_t roots_count = sizeof roots / sizeof *roots;
+    double f = roots[(size_t)mi % roots_count];
     double lfo1 = 1.0 / AMBIENT_SECS, lfo2 = 3.0 / AMBIENT_SECS;
     double beat = 1.0 / AMBIENT_SECS; /* detune that wraps the seam */
     for (int i = 0; i < n; i++) {
@@ -4978,8 +4985,11 @@ static bool thermo_ready_ = false;
 static bool thermo_waiting_sample_ = false;
 static bool thermo_waiting_feedback_ = false;
 static bool thermo_reset_pending_ = false;
+static bool thermo_failed_ = false;
 static double thermo_beta_ = 0;
 static double thermo_confidence_ = 0;
+static double thermo_energy_ = 0;
+static bool thermo_energy_valid_ = false;
 static long thermo_observations_ = 0;
 static long thermo_round_ = 0;
 static long thermo_proposals_ = 0;
@@ -5107,11 +5117,15 @@ static bool thermo_launch(void) {
     thermo_waiting_sample_ = false;
     thermo_waiting_feedback_ = false;
     thermo_reset_pending_ = g_thermo_reset_learning;
+    thermo_failed_ = false;
     g_thermo_reset_learning = false;
     thermo_launches_++;
     thermo_valid_ = false; /* a fresh run must earn its own result */
     thermo_beta_ = 0;
     thermo_confidence_ = 0;
+    thermo_energy_ = 0;
+    thermo_energy_valid_ = false;
+    thermo_bad_ = -1;
     thermo_observations_ = 0;
     thermo_round_ = 0;
     thermo_proposals_ = 0;
@@ -5206,7 +5220,26 @@ static const char *json_str(const char *s, const char *key) {
 static long json_num(const char *s, const char *key, long fallback) {
     const char *p = json_str(s, key);
     if (!p) return fallback;
-    return atol(p);
+    errno = 0;
+    char *end = NULL;
+    long value = strtol(p, &end, 10);
+    return errno == ERANGE || end == p ? fallback : value;
+}
+
+static bool json_double_set(const char *s, const char *key, double *out) {
+    const char *p = json_str(s, key);
+    if (!p || !out) return false;
+    errno = 0;
+    char *end = NULL;
+    double value = strtod(p, &end);
+    if (errno == ERANGE || end == p || !isfinite(value)) return false;
+    *out = value;
+    return true;
+}
+
+static double json_double(const char *s, const char *key, double fallback) {
+    double value = fallback;
+    return json_double_set(s, key, &value) ? value : fallback;
 }
 
 static int thermo_context_index(int cell) {
@@ -5480,7 +5513,7 @@ static int thermo_poll(void) {
             char c = chunk[k];
             if (c != '\n') {
                 if (thermo_lbl + 1 >= thermo_lcap) {
-                    if (thermo_lcap >= (1u << 25)) { /* 32MB: runaway child */ continue; }
+                    if (thermo_lcap >= (1u << 25)) goto thermo_fail;
                     thermo_lcap = thermo_lcap ? thermo_lcap * 2 : 65536;
                     char *nb = realloc(thermo_lbuf, thermo_lcap);
                     if (!nb) goto thermo_fail;
@@ -5518,13 +5551,16 @@ static int thermo_poll(void) {
                     } else if (!strncmp(tp + 1, "meta", 4) && tp[5] == '"') {
                         thermo_pbits_ = (int)json_num(s, "pbits", 0);
                     } else if (!strncmp(tp + 1, "stats", 5) && tp[6] == '"') {
-                        const char *bp = json_str(s, "beta");
-                        const char *cp = json_str(s, "confidence");
                         thermo_round_ = json_num(s, "round", thermo_round_);
-                        thermo_beta_ = bp ? strtod(bp, NULL) : thermo_beta_;
-                        thermo_confidence_ = cp ? strtod(cp, NULL) : thermo_confidence_;
+                        thermo_beta_ = json_double(s, "beta", thermo_beta_);
+                        thermo_confidence_ = json_double(s, "confidence", thermo_confidence_);
+                        if (json_double_set(s, "energy", &thermo_energy_))
+                            thermo_energy_valid_ = true;
                         thermo_bad_ = json_num(s, "bad", thermo_bad_);
                     } else if (!strncmp(tp + 1, "proposal", 8) && tp[9] == '"') {
+                        thermo_bad_ = json_num(s, "bad", thermo_bad_);
+                        if (json_double_set(s, "energy", &thermo_energy_))
+                            thermo_energy_valid_ = true;
                         if (!thermo_waiting_sample_ || !thermo_apply_patch(s)) goto thermo_fail;
                         thermo_waiting_sample_ = false;
                     } else if (!strncmp(tp + 1, "learn", 5) && tp[6] == '"') {
@@ -5537,6 +5573,8 @@ static int thermo_poll(void) {
                     } else if (!strncmp(tp + 1, "done", 4) && (tp[5] == '"' || tp[5] == ',')) {
                         thermo_valid_ = json_num(s, "valid", 0) > 0;
                         thermo_bad_ = json_num(s, "bad", -1);
+                        if (json_double_set(s, "energy", &thermo_energy_))
+                            thermo_energy_valid_ = true;
                         if (thermo_valid_ && !thermo_apply_cfg(s)) {
                             thermo_valid_ = false;
                             goto thermo_fail;
@@ -5557,15 +5595,39 @@ static int thermo_poll(void) {
             thermo_lbl = 0;
         }
     }
+    if (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+        goto thermo_fail;
     if (got == 0) { /* child closed the pipe */
         if (thermo_valid_) { thermo_kill(); return 1; }
         goto thermo_fail;
     }
     return 0;
 thermo_fail:
+    thermo_failed_ = true;
     thermo_kill();
     set_note("thermo failed \xe2\x80\x94 classic solver");
     return -1;
+}
+
+static RGB mode_accent(void) {
+    static const RGB accents[] = {
+        {110, 220, 255}, {255, 194, 98}, {255, 132, 154}, {168, 235, 128},
+        {206, 166, 255}, {105, 232, 207}, {255, 164, 96}, {160, 180, 255}
+    };
+    int index = g_mode_idx < 0 ? 0 : g_mode_idx;
+    index %= (int)(sizeof accents / sizeof accents[0]);
+    return accents[index];
+}
+
+static const char *thermo_phase(void) {
+    if (!g_thermo) return "classic";
+    if (thermo_failed_) return "error";
+    if (thermo_valid_) return "done";
+    if (!thermo_inflight_) return "idle";
+    if (!thermo_ready_) return "boot";
+    if (thermo_waiting_sample_) return "anneal";
+    if (thermo_waiting_feedback_) return "learn";
+    return "ready";
 }
 
 /* Persistent one-line HUD: keep the canvas legible while making the solver's
@@ -5577,28 +5639,41 @@ static void render_status(int vh, int ch) {
     int pct = total > 0 ? (int)(100.0 * g_decided / total) : 0;
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
-    char core[160], line[256];
+    char core[320], line[320], bad[24], energy[24], progress[21];
     const char *mode = mode_name();
     const char *fit = g_fullscreen ? " FILL" : "";
+    const char *phase = thermo_phase();
+    int filled = (pct * 20 + 50) / 100;
+    if (filled < 0) filled = 0;
+    if (filled > 20) filled = 20;
+    for (int i = 0; i < 20; i++) progress[i] = i < filled ? '#' : '.';
+    progress[20] = 0;
+    snprintf(bad, sizeof bad, "n/a");
+    snprintf(energy, sizeof energy, "n/a");
+    if (thermo_bad_ >= 0) snprintf(bad, sizeof bad, "%ld", thermo_bad_);
+    if (thermo_energy_valid_) snprintf(energy, sizeof energy, "%.2f", thermo_energy_);
     if (g_thermo) {
-        const char *engine = thermo_ready_ ? thermo_sampler_ :
-                             thermo_inflight_ ? "boot" :
-                             pct == 100 ? "done" : "idle";
+        const char *engine = thermo_ready_ ? thermo_sampler_ : phase;
         const char *learning = g_thermo_learn ? "learn" : "ephem";
         if (g_quality_live >= 0.0) {
-            snprintf(core, sizeof core, "%s %3d%% | T/%s q%.2f o%ld/%ld P%d %s [%dx%d]%s",
-                     mode, pct, engine, g_quality_live, thermo_observations_,
-                     thermo_round_, studio_pin_count_, learning, W_, H_, fit);
+            snprintf(core, sizeof core,
+                     "%s %3d%% [%s] | T/%-7s %-5s/%s q%.2f beta %.2f conf %.2f e %s bad %s r%ld o%ld P%4d [%dx%d]%s",
+                     mode, pct, progress, engine, phase, learning, g_quality_live, thermo_beta_,
+                     thermo_confidence_, energy, bad, thermo_round_, thermo_observations_,
+                     studio_pin_count_, W_, H_, fit);
         } else {
-            snprintf(core, sizeof core, "%s %3d%% | T/%s P%d %s [%dx%d]%s",
-                     mode, pct, engine, studio_pin_count_, learning, W_, H_, fit);
+            snprintf(core, sizeof core,
+                     "%s %3d%% [%s] | T/%-7s %-5s/%s beta %.2f conf %.2f e %s bad %s r%ld o%ld P%4d [%dx%d]%s",
+                     mode, pct, progress, engine, phase, learning, thermo_beta_, thermo_confidence_,
+                     energy, bad, thermo_round_, thermo_observations_, studio_pin_count_,
+                     W_, H_, fit);
         }
     } else if (g_quality_live >= 0.0) {
-        snprintf(core, sizeof core, "%s %3d%% | classic q%.2f P%d [%dx%d]%s",
-                 mode, pct, g_quality_live, studio_pin_count_, W_, H_, fit);
+        snprintf(core, sizeof core, "%s %3d%% [%s] | classic q%.2f P%d [%dx%d]%s",
+                 mode, pct, progress, g_quality_live, studio_pin_count_, W_, H_, fit);
     } else {
-        snprintf(core, sizeof core, "%s %3d%% | classic P%d [%dx%d]%s",
-                 mode, pct, studio_pin_count_, W_, H_, fit);
+        snprintf(core, sizeof core, "%s %3d%% [%s] | classic P%d [%dx%d]%s",
+                 mode, pct, progress, studio_pin_count_, W_, H_, fit);
     }
     if (now_ms() < g_note_until && g_note[0])
         snprintf(line, sizeof line, "%s | %s", core, g_note);
@@ -5609,7 +5684,9 @@ static void render_status(int vh, int ch) {
     snprintf(pos, sizeof pos, "\x1b[%d;1H", vh * ch + 1);
     fb_puts(pos);
     fb_bg((RGB){10, 12, 18});
-    fb_fg(g_thermo ? (RGB){172, 224, 214} : (RGB){170, 196, 224});
+    RGB status_color = mode_accent();
+    if (!strcmp(phase, "error")) status_color = (RGB){255, 112, 112};
+    fb_fg(status_color);
     fb_puts(" ");
     fb_puts(line);
     fb_puts("\x1b[K");
@@ -5634,12 +5711,14 @@ static bool save_report(const char *path) {
     fprintf(f, ",\"round\":%ld,\"observations\":%ld,\"proposals\":%ld,"
                "\"accepted\":%ld,\"rejected\":%ld,\"displaced\":%ld,"
                "\"contradictions\":%ld,"
-               "\"beta\":%.9g,\"confidence\":%.9g},"
+               "\"bad\":%ld,\"beta\":%.9g,\"confidence\":%.9g,"
+               "\"energy_valid\":%s,\"energy\":%.9g},"
                "\"studio\":{\"pins\":%d},\"macro\":{\"name\":",
             thermo_round_, thermo_observations_, thermo_proposals_,
             thermo_accepts_, thermo_rejects_, thermo_displaced_,
-            thermo_contradictions_,
-            thermo_beta_, thermo_confidence_, studio_pin_count_);
+            thermo_contradictions_, thermo_bad_, thermo_beta_,
+            thermo_confidence_, thermo_energy_valid_ ? "true" : "false",
+            thermo_energy_, studio_pin_count_);
     thermo_json_string(f, macro_name());
     fprintf(f, ",\"guided_cells\":%d},\"evolution\":{\"candidates\":%d,"
                "\"winner_seed\":%llu,\"scores\":[",
@@ -5742,7 +5821,11 @@ static void render_observatory(void) {
         "smoothness", "stability", "topology",
     };
     static const char *spark[] = {" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇"};
-    char line[256];
+    char bad[24], energy[24], line[256];
+    snprintf(bad, sizeof bad, "n/a");
+    snprintf(energy, sizeof energy, "n/a");
+    if (thermo_bad_ >= 0) snprintf(bad, sizeof bad, "%ld", thermo_bad_);
+    if (thermo_energy_ >= 0) snprintf(energy, sizeof energy, "%.2f", thermo_energy_);
     fb_reset();
     fb_puts("\x1b[H\x1b[2J");
     fb_fg((RGB){150, 232, 255});
@@ -5752,9 +5835,11 @@ static void render_observatory(void) {
              mode_name(), profile.focus, (unsigned long long)g_seed,
              studio_pin_count_);
     fb_puts(line);
-    snprintf(line, sizeof line, "solver %-7s  sampler %-8s  learning %-5s  beta %.2f  confidence %.2f\n",
+    snprintf(line, sizeof line,
+             "solver %-7s  sampler %-8s  learning %-5s  beta %.2f  energy %s  confidence %.2f  bad %s\n",
              g_thermo ? "thermo" : "classic", thermo_sampler_,
-             g_thermo_learn ? "on" : "off", thermo_beta_, thermo_confidence_);
+             g_thermo_learn ? "on" : "off", thermo_beta_,
+             energy, thermo_confidence_, bad);
     fb_puts(line);
     snprintf(line, sizeof line, "round %ld  observations %ld  proposals %ld  accepted %ld  rejected %ld  displaced %ld  contradictions %ld\n",
              thermo_round_, thermo_observations_, thermo_proposals_, thermo_accepts_,

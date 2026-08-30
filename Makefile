@@ -63,10 +63,10 @@ learning-check:
 quality-check: wfc
 	@set -e; \
 	for m in circuit streets neurons mycelium delta rail; do \
-		out=$$(WFC_DEBUG=1 ./wfc --mode $$m --seed 7 --w 8 --h 6 --once 2>&1 >/dev/null); \
+	out=$$(WFC_DEBUG=1 ./wfc --mode $$m --seed 7 --w 8 --h 6 --once 2>&1); \
 		echo "$$out" | grep -q 'quality='; \
 	done; \
-	street=$$(WFC_DEBUG=1 ./wfc --mode streets --seed 7 --w 8 --h 6 --once 2>&1 >/dev/null); \
+	street=$$(WFC_DEBUG=1 ./wfc --mode streets --seed 7 --w 8 --h 6 --once 2>&1); \
 	echo "$$street" | grep -q 'boundary=1.000'; \
 	echo "quality: deterministic metrics and network borders OK"
 
