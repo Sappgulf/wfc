@@ -425,7 +425,12 @@ static void build_truchet(void) {
             t->weight = 2.0;
         }
 }
+/* Bumped whenever tile weights change, so the entropy cache invalidates
+ * itself rather than relying on every writer to remember it. */
+static uint32_t weights_gen_ = 1;
+
 static void apply_bias(void) {
+    weights_gen_++;
     for (int i = 0; i < ntiles_; i++) {
         if (tiles_[i].wbase <= 0) {
             tiles_[i].wbase = tiles_[i].weight > 0 ? tiles_[i].weight : 1.0;
@@ -1219,23 +1224,65 @@ static bool propagate_from(int start) {
 
 /* collapse lowest-entropy cell, propagate constraints outward.
  * returns 1 done, 0 progressed, -1 contradiction (caller restarts cheaply). */
+/* Weight entropy is a function of the domain mask alone, but the scan
+ * recomputed it for every undecided cell on every step — a loop over the set
+ * bits, so the solve cost ran with the tileset size. dungeon carries 49 tiles
+ * against maze's 16 and took three times as long for the same grid.
+ *
+ * The cache is keyed on the mask it was computed from, so it validates
+ * itself: nothing has to invalidate it, and the many places that assign or
+ * memcpy dom_ wholesale (thermo rollback, undo, history, pins) stay correct
+ * without knowing it exists. The random tiebreak jitter deliberately stays
+ * outside — it draws from the rng every step, and caching it would change how
+ * much rng each solve consumes and therefore every world it produces. */
+static double *ent_val_ = NULL;      /* cached weight entropy */
+static uint64_t *ent_key_ = NULL;    /* the mask it was computed from */
+static size_t ent_cap_ = 0;
+
+static bool entropy_cache_fit(size_t cells) {
+    if (ent_cap_ >= cells) return true;
+    double *v = realloc(ent_val_, sizeof(double) * cells);
+    if (!v) return false;
+    ent_val_ = v;
+    uint64_t *k = realloc(ent_key_, sizeof(uint64_t) * cells);
+    if (!k) return false;
+    ent_key_ = k;
+    /* 0 is never a live domain, so a zeroed key always misses */
+    memset(ent_key_, 0, sizeof(uint64_t) * cells);
+    ent_cap_ = cells;
+    return true;
+}
+
+static double weight_entropy(int i, uint64_t mask) {
+    static uint32_t seen_gen = 0;
+    if (seen_gen != weights_gen_) {         /* weights moved: drop everything */
+        seen_gen = weights_gen_;
+        if (ent_key_ && ent_cap_) memset(ent_key_, 0, sizeof(uint64_t) * ent_cap_);
+    }
+    if (ent_key_ && (size_t)i < ent_cap_ && ent_key_[i] == mask) return ent_val_[i];
+    double sw = 0, slw = 0;
+    uint64_t m = mask;
+    while (m) {
+        int b = __builtin_ctzll(m); m &= m - 1;
+        sw += tiles_[b].weight;
+        slw += tiles_[b].weight * tiles_[b].lw;
+    }
+    double e = sw > 0 ? log2(sw) - slw / sw : 0;
+    if (ent_key_ && (size_t)i < ent_cap_) { ent_key_[i] = mask; ent_val_[i] = e; }
+    return e;
+}
+
 static int wfc_step(void) {
     int best = -1, ties = 0;
     double be = 1e9;
     g_decided = 0;
+    (void)entropy_cache_fit((size_t)W_ * (size_t)H_);
     for (int i = 0; i < W_ * H_; i++) {
         int k = pc64(dom_[i]);
         if (k == 0) return -1;
         if (k == 1) g_decided++;
         if (k > 1) {
-            double sw = 0, slw = 0;
-            uint64_t m = dom_[i];
-            while (m) {
-                int b = __builtin_ctzll(m); m &= m - 1;
-                sw += tiles_[b].weight;
-                slw += tiles_[b].weight * tiles_[b].lw;
-            }
-            double e = sw > 0 ? log2(sw) - slw / sw : 0;
+            double e = weight_entropy(i, dom_[i]);
             if (macro_role_ && macro_role_[i] != MACRO_NONE) e -= 0.08;
             e += rndf() * 1e-6;
             if (e < be * (1 - 1e-9)) { be = e; best = i; ties = 1; }
@@ -2129,10 +2176,28 @@ static const uint8_t BRAILLE_BIT[4][2] = {{0x01, 0x08}, {0x02, 0x10}, {0x04, 0x2
 /* ---------------- transient status note ---------------- */
 static char g_note[128];
 static double g_note_until = 0;
+/* Renderers sample the clock for every animation — drifting clouds, the rail
+ * headlamp, glacier glints, the stained-glass sweep. That is right for the
+ * live view and wrong for an export: the same seed saved twice produced two
+ * different images, in a program whose whole premise is that a seed is a
+ * world you can share. A headless run therefore freezes the clock at a phase
+ * derived from the seed, so exports are reproducible while different seeds
+ * still catch their animations at different moments. */
+static bool g_clock_frozen = false;
+static double g_clock_frozen_ms = 0;
+
 static double now_ms(void) {
+    if (g_clock_frozen) return g_clock_frozen_ms;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+static void clock_freeze_for_export(void) {
+    g_clock_frozen = true;
+    /* a seed-derived phase: stable per seed, varied across seeds */
+    g_clock_frozen_ms = (double)(hash3((uint32_t)g_seed,
+                                       (uint32_t)(g_seed >> 32), 0x0C10CBu) % 600000u);
 }
 /* window title: show the live world (called on mode changes only) */
 static void set_note(const char *fmt, ...) {
@@ -7321,6 +7386,7 @@ int main(int argc, char **argv) {
     }
 
     bool tty = isatty(STDOUT_FILENO);
+    if (!tty) clock_freeze_for_export();
     g_is_tty = tty;
     if (!g_seed_set) g_seed = (uint64_t)time(NULL) * 2654435761u + (uint64_t)getpid();
     rs_ = g_seed ^ 0xD1B54A32D192ED03ULL;

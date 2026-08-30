@@ -39,6 +39,12 @@ regression: wfc
 	if ./wfc --mode fire --w 8 --h 6 --once --save /tmp >/dev/null 2>/dev/null; then \
 		echo 'regression: failed save was reported as success' >&2; exit 1; \
 	fi; \
+	for m in terrain rail geode storm stained; do \
+		./wfc --mode $$m --seed 4242 --w 24 --h 12 --once --save /tmp/wfc-rep-a.png >/dev/null; \
+		./wfc --mode $$m --seed 4242 --w 24 --h 12 --once --save /tmp/wfc-rep-b.png >/dev/null; \
+		cmp -s /tmp/wfc-rep-a.png /tmp/wfc-rep-b.png || { \
+			echo "regression: $$m export is not reproducible" >&2; exit 1; }; \
+	done; \
 	out=$$(mktemp -d /tmp/wfc-regression.XXXXXX); \
 	./wfc --mode fire --seed 9 --w 8 --h 6 --once --save "$$out/map.png" >/dev/null; \
 	test -s "$$out/map.png"; \
