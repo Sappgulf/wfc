@@ -81,6 +81,21 @@ studio-c-check:
 quality-benchmark: wfc
 	@python3 tests/quality_benchmark.py --binary ./wfc --trials 1 --w 8 --h 6
 
+# every mode against every render toggle, under ASan+UBSan
+sweep: wfc_asan
+	@set -e; fail=0; runs=0; \
+	for m in $$(./wfc --list-modes); do \
+		for opt in "" "--pan" "--zoom 4" "--no-bloom --no-weather" "--daycycle" "--w 7 --h 5"; do \
+			runs=$$((runs + 1)); \
+			ASAN_OPTIONS=detect_leaks=0 ./wfc_asan --mode $$m --seed 12345 \
+				--w 24 --h 14 --once $$opt >/dev/null 2>/tmp/wfc_sweep_err.log || { \
+				echo "FAIL: $$m $$opt"; head -14 /tmp/wfc_sweep_err.log; fail=1; }; \
+			grep -qE 'ERROR|runtime error' /tmp/wfc_sweep_err.log && { \
+				echo "SANITIZER: $$m $$opt"; head -14 /tmp/wfc_sweep_err.log; fail=1; }; \
+		done; \
+	done; \
+	[ $$fail -eq 0 ] && echo "sweep: $$runs mode/option combos clean"
+
 fuzz: wfc_asan
 	@set -e; modes=$$(./wfc --list-modes); n=$$(echo "$$modes" | wc -l | tr -d ' '); \
 	fail=0; \
@@ -99,10 +114,16 @@ fuzz: wfc_asan
 	done; \
 	[ $$fail -eq 0 ] && echo "fuzz: 25 random combos clean"
 
+# everything a change has to survive before it lands
+check: strict test regression python-check protocol-check bridge-check \
+       learning-check quality-check studio-check studio-c-check \
+       quality-benchmark sweep fuzz
+	@echo "check: all suites clean"
+
 clean:
 	rm -rf wfc wfc_asan wfc_debug wfc_asan.dSYM
 
 install: wfc
 	install -m 0755 wfc /usr/local/bin/wfc
 
-.PHONY: clean install asan strict debug test regression python-check protocol-check bridge-check learning-check quality-check studio-check studio-c-check quality-benchmark fuzz
+.PHONY: check clean install asan strict debug test regression python-check protocol-check bridge-check learning-check quality-check studio-check studio-c-check quality-benchmark sweep fuzz

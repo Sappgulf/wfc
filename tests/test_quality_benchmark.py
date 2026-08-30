@@ -13,7 +13,7 @@ class QualityBenchmarkTests(unittest.TestCase):
     def test_benchmark_covers_solver_paths_and_network_modes(self):
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--binary", str(ROOT / "wfc"),
-             "--trials", "1", "--w", "5", "--h", "4"],
+             "--trials", "1", "--w", "8", "--h", "6"],
             cwd=ROOT, capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)

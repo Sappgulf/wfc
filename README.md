@@ -224,6 +224,12 @@ automation. For a deeper local experiment, run
 
 ## Test discipline
 
+`make check` is the gate: pedantic build, all 25 modes, seed/argument/export
+regressions, the Python protocol, bridge and learner suites, the quality
+benchmark, a 150-combo sanitizer sweep of every mode against every render
+toggle (`make sweep`), and a randomized ASan fuzz (`make fuzz`). The whole
+thing runs in about 25 seconds.
+
 - 25/25 modes solve first-try across seed sweeps
 - AddressSanitizer + UBSan clean on solver, exports, all interactive paths
   (`make asan`, then `./wfc_asan --mode <m> --once --save out.png`; pty via
@@ -233,6 +239,7 @@ automation. For a deeper local experiment, run
   synchronized-output wrapped
 - `--bench` prints a per-mode performance table
 - `make quality-benchmark` compares quality-directed solver paths
+- `make sweep` runs every mode against every render toggle under ASan+UBSan
 
-~5,800 lines of C, ~900 lines of Python. `cc -O2 -std=c11 -o wfc wfc.c -lz`
+~6,900 lines of C, ~1,600 lines of Python. `cc -O2 -std=c11 -o wfc wfc.c -lz`
 if you hate make.
