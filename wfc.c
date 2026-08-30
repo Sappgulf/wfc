@@ -49,11 +49,92 @@
 #define NDIR 4
 #define OPPOSITE(d) (((d) + 2) & 3)
 
-/* ---------------- config ---------------- */
-#define NMODES 25
-static const char *MODES[NMODES] = {"circuit", "terrain", "truchet", "fire", "waves", "dungeon", "maze", "galaxy", "city", "aurora", "matrix", "pipes", "mondrian", "koi", "lava", "sakura", "geode", "lantern", "dunes", "reef", "stained", "streets", "neurons", "mycelium", "delta"};
+/* ---------------- mode registry ----------------
+ * One row per world. Everything that used to be a strcmp chain — which
+ * builder runs, which compatibility rule applies, whether the world wraps,
+ * whether it renders smoothed, the vertical band ramp the grid seeds along,
+ * which family the density bias tilts, and the idle-animation clock — lives
+ * here. Adding a world is a row plus its render branch. */
+static void build_circuit(void);
+static void build_terrain(void);
+static void build_truchet(void);
+static void build_fire(void);
+static void build_waves(void);
+static void build_dungeon(void);
+static void build_maze(void);
+static void build_galaxy(void);
+static void build_city(void);
+static void build_aurora(void);
+static void build_matrix(void);
+static void build_pipes(void);
+static void build_mondrian(void);
+static void build_koi(void);
+static void build_lava(void);
+static void build_sakura(void);
+static void build_geode(void);
+static void build_lantern(void);
+static void build_dunes(void);
+static void build_reef(void);
+static void build_stained(void);
+static void build_streets(void);
+static void build_neurons(void);
+static void build_mycelium(void);
+static void build_delta(void);
+
+enum {              /* which family apply_bias() tilts */
+    MG_FIELD = 0,       /* band worlds: tilt along band order */
+    MG_CONNECTOR,       /* connector lattice: tilt empty vs drawn */
+    MG_CARVE,           /* dungeon/maze: tilt solid vs carved */
+};
+
+typedef struct {
+    const char *name;
+    const char *blurb;
+    void (*build)(void);
+    bool smooth_compat;   /* build_compat(): |band diff| <= 1, not equality */
+    bool torus;           /* the world wraps at its edges */
+    bool smooth_render;
+    bool band_ramp;       /* seed domains along a vertical band gradient */
+    bool ramp_flip;       /* ...running bottom-to-top instead */
+    unsigned char group;
+    unsigned tick_ms;     /* idle-animation clock bucket; 0 = static */
+} ModeSpec;
+
+/*                name        blurb                                              build            sc   tor    sr   ramp  flip  group         tick */
+static const ModeSpec MODESPEC[] = {
+    {"circuit",  "rainbow circuit boards, signals racing traces",   build_circuit,  false, true,  false, false, false, MG_CONNECTOR, 140},
+    {"terrain",  "hillshaded biomes + carved rivers + day cycle",   build_terrain,  true,  true,  true,  false, false, MG_FIELD,     260},
+    {"truchet",  "woven arcs with a travelling light pulse",        build_truchet,  false, false, false, false, false, MG_CONNECTOR, 500},
+    {"fire",     "living flames with rising embers",                build_fire,     true,  false, true,  true,  false, MG_FIELD,      90},
+    {"waves",    "rolling ocean, crest lines, moonpath",            build_waves,    true,  true,  true,  false, false, MG_FIELD,     160},
+    {"dungeon",  "torch-lit catacombs with breathing warmth",       build_dungeon,  false, true,  false, false, false, MG_CARVE,     220},
+    {"maze",     "labyrinth with wall pulses",                      build_maze,     false, true,  false, false, false, MG_CARVE,     360},
+    {"galaxy",   "nebulae with shooting stars",                     build_galaxy,   true,  true,  true,  false, false, MG_FIELD,     100},
+    {"city",     "night skylines with beacons + rain",              build_city,     true,  false, true,  true,  false, MG_FIELD,     400},
+    {"aurora",   "drifting green curtains over stars",              build_aurora,   true,  false, true,  true,  true,  MG_FIELD,     150},
+    {"matrix",   "digital rain with white-hot glyph heads",         build_matrix,   true,  true,  true,  false, false, MG_FIELD,     140},
+    {"pipes",    "water pressure networks, pulses racing runs",     build_pipes,    false, true,  false, false, false, MG_CONNECTOR, 180},
+    {"mondrian", "painted plazas split by charcoal rules",          build_mondrian, true,  true,  true,  false, false, MG_FIELD,     400},
+    {"koi",      "pond bands, koi gliding between lily pads",       build_koi,      true,  true,  true,  false, false, MG_FIELD,     250},
+    {"lava",     "crusting basalt over a molten breath",            build_lava,     true,  false, true,  true,  true,  MG_FIELD,     130},
+    {"sakura",   "spring night, blossom petals drifting down",      build_sakura,   true,  false, true,  true,  false, MG_FIELD,     120},
+    {"geode",    "crystal cavern facets with wandering glints",     build_geode,    true,  true,  true,  false, false, MG_FIELD,     160},
+    {"lantern",  "festival sky, lanterns rising past the stars",    build_lantern,  true,  false, true,  true,  true,  MG_FIELD,     220},
+    {"dunes",    "heat shimmer under a fixed blazing sun",          build_dunes,    true,  false, true,  true,  false, MG_FIELD,     200},
+    {"reef",     "caustic water, coral, bubbles, a fish school",    build_reef,     true,  false, true,  true,  false, MG_FIELD,     160},
+    {"stained",  "jewel-glass panes, lead lines, roaming light",    build_stained,  true,  true,  true,  false, false, MG_FIELD,     300},
+    {"streets",  "arterial grid, lanes, signals, intersections",    build_streets,  false, false, false, false, false, MG_CONNECTOR, 170},
+    {"neurons",  "branching dendrites with travelling potentials",  build_neurons,  false, true,  false, false, false, MG_CONNECTOR,  95},
+    {"mycelium", "living root networks, knots, drifting spores",    build_mycelium, false, true,  false, false, false, MG_CONNECTOR, 260},
+    {"delta",    "tidal estuary channels, confluences, sandbars",   build_delta,    false, false, false, false, false, MG_CONNECTOR, 145},
+};
+#define NMODES ((int)(sizeof MODESPEC / sizeof *MODESPEC))
 static int g_mode_idx = 0;
+static const ModeSpec *mode_spec(void);
+static const char *mode_name(void);
 static int g_user_w = 999, g_user_h = 999;
+static const ModeSpec *mode_spec(void) { return &MODESPEC[g_mode_idx]; }
+static const char *mode_name(void) { return MODESPEC[g_mode_idx].name; }
 static bool g_fullscreen = false;
 static uint64_t g_seed = 0;
 static bool g_seed_set = false;
@@ -130,32 +211,8 @@ static double g_quality_topology_live = -1.0;
 /* per-mode animation clock: coarse buckets so idle animations repaint
  * at sane rates instead of mutating every pixel every frame */
 static uint32_t anim_epoch(void) {
-    const char *m = MODES[g_mode_idx];
-    if (!strcmp(m, "fire")) return (uint32_t)(now_ms() / 90);
-    if (!strcmp(m, "waves")) return (uint32_t)(now_ms() / 160);
-    if (!strcmp(m, "galaxy")) return (uint32_t)(now_ms() / 100);
-    if (!strcmp(m, "city")) return (uint32_t)(now_ms() / 400);
-    if (!strcmp(m, "terrain")) return (uint32_t)(now_ms() / 260); /* clouds + rivers */
-    if (!strcmp(m, "circuit")) return (uint32_t)(now_ms() / 140); /* signal pulses */
-    if (!strcmp(m, "truchet")) return (uint32_t)(now_ms() / 500); /* strand glow */
-    if (!strcmp(m, "dungeon")) return (uint32_t)(now_ms() / 220); /* depth + fireflies */
-    if (!strcmp(m, "maze")) return (uint32_t)(now_ms() / 360);    /* wall breathing */
-    if (!strcmp(m, "matrix")) return (uint32_t)(now_ms() / 140);  /* rain refresh */
-    if (!strcmp(m, "pipes")) return (uint32_t)(now_ms() / 180);   /* water flow */
-    if (!strcmp(m, "mondrian")) return (uint32_t)(now_ms() / 400);
-    if (!strcmp(m, "koi")) return (uint32_t)(now_ms() / 250);     /* koi drift */
-    if (!strcmp(m, "lava")) return (uint32_t)(now_ms() / 130);    /* crust crawl */
-    if (!strcmp(m, "sakura")) return (uint32_t)(now_ms() / 120);  /* petal fall */
-    if (!strcmp(m, "geode")) return (uint32_t)(now_ms() / 160);   /* glint wander */
-    if (!strcmp(m, "lantern")) return (uint32_t)(now_ms() / 220); /* lantern rise */
-    if (!strcmp(m, "dunes")) return (uint32_t)(now_ms() / 200);   /* heat shimmer */
-    if (!strcmp(m, "reef")) return (uint32_t)(now_ms() / 160);    /* caustics + fish */
-    if (!strcmp(m, "stained")) return (uint32_t)(now_ms() / 300); /* light sweep */
-    if (!strcmp(m, "streets")) return (uint32_t)(now_ms() / 170);  /* traffic signals */
-    if (!strcmp(m, "neurons")) return (uint32_t)(now_ms() / 95);   /* action potentials */
-    if (!strcmp(m, "mycelium")) return (uint32_t)(now_ms() / 260); /* spore drift */
-    if (!strcmp(m, "delta")) return (uint32_t)(now_ms() / 145); /* tidal glints */
-    return 0;
+    unsigned tick = MODESPEC[g_mode_idx].tick_ms;
+    return tick ? (uint32_t)(now_ms() / tick) : 0;
 }
 static int g_bulk_idx = -1;
 static bool g_cycle = false;
@@ -341,25 +398,19 @@ static void apply_bias(void) {
         if (tiles_[i].weight < 1e-9) tiles_[i].weight = 1e-9;
         tiles_[i].lw = log2(tiles_[i].weight);
     }
-    if (!strcmp(MODES[g_mode_idx], "circuit") || !strcmp(MODES[g_mode_idx], "truchet") ||
-        !strcmp(MODES[g_mode_idx], "pipes") || !strcmp(MODES[g_mode_idx], "streets") ||
-        !strcmp(MODES[g_mode_idx], "neurons") || !strcmp(MODES[g_mode_idx], "mycelium") ||
-        !strcmp(MODES[g_mode_idx], "delta")) {
+    if (mode_spec()->group == MG_CONNECTOR) {
         g_bulk_idx = 0;
         for (int i = 0; i < ntiles_; i++)
             tiles_[i].weight = tiles_[i].wbase *
                 (i == 0 ? pow(0.22, (g_bias - 0.5) * 4) : pow(2.2, (g_bias - 0.5) * 2));
         return;
     }
-    if (!strcmp(MODES[g_mode_idx], "dungeon") || !strcmp(MODES[g_mode_idx], "maze")) {
+    if (mode_spec()->group == MG_CARVE) {
         /* tilt rock/solid vs carved: scale pure-bulk tile and wall/passage weights */
         for (int i = 0; i < ntiles_; i++) {
             bool bulk = true;
-            for (int d = 0; d < NDIR; d++) {
-                uint8_t v = tiles_[i].e[d];
-                if ((!strcmp(MODES[g_mode_idx], "dungeon") && v != 0) ||
-                    (!strcmp(MODES[g_mode_idx], "maze") && v != 0)) { bulk = false; break; }
-            }
+            for (int d = 0; d < NDIR; d++)
+                if (tiles_[i].e[d] != 0) { bulk = false; break; }
             tiles_[i].weight = tiles_[i].wbase *
                 (bulk ? pow(0.22, (g_bias - 0.5) * 4) : pow(2.2, (g_bias - 0.5) * 2));
         }
@@ -388,15 +439,21 @@ static void build_compat(bool smooth) {
             cdir_[d][a] = ok;
         }
 }
-/* waves: wave-height bands 0..7 on a torus, animated crests */
-static void build_waves(void) {
-    const double w[] = {6, 9, 12, 10, 7, 4, 2, 1};
+/* Eleven worlds are the same eight-band field — a scalar height/intensity
+ * carried on every edge, smoothed to |diff| <= 1 by build_compat(true). Only
+ * the band weights and the render treatment differ. */
+static void build_band_world(const double weights[8]) {
     for (int i = 0; i < 8; i++) {
         Tile *t = &tiles_[ntiles_++];
         memset(t, 0, sizeof *t);
         t->e[0] = t->e[1] = t->e[2] = t->e[3] = (uint8_t)(i << 4);
-        t->weight = t->wbase = w[i];
+        t->weight = t->wbase = weights[i];
     }
+}
+/* waves: wave-height bands 0..7 on a torus, animated crests */
+static void build_waves(void) {
+    static const double w[8] = {6, 9, 12, 10, 7, 4, 2, 1};
+    build_band_world(w);
 }
 /* maze: bit per edge = passage opening. dense braided labyrinth */
 static void build_maze(void) {
@@ -411,103 +468,53 @@ static void build_maze(void) {
 }
 /* galaxy: nebula density bands 0..7 on a torus; stars twinkle in render */
 static void build_galaxy(void) {
-    const double w[] = {10, 9, 8, 7, 6, 4, 3, 2};
-    for (int i = 0; i < 8; i++) {
-        Tile *t = &tiles_[ntiles_++];
-        memset(t, 0, sizeof *t);
-        t->e[0] = t->e[1] = t->e[2] = t->e[3] = (uint8_t)(i << 4);
-        t->weight = t->wbase = w[i];
-    }
+    static const double w[8] = {10, 9, 8, 7, 6, 4, 3, 2};
+    build_band_world(w);
 }
 /* sakura: spring-night sky bands 0..7, petals drift down in render */
 static void build_sakura(void) {
-    const double w[] = {3, 5, 7, 9, 11, 12, 10, 8};
-    for (int i = 0; i < 8; i++) {
-        Tile *t = &tiles_[ntiles_++];
-        memset(t, 0, sizeof *t);
-        t->e[0] = t->e[1] = t->e[2] = t->e[3] = (uint8_t)(i << 4);
-        t->weight = t->wbase = w[i];
-    }
+    static const double w[8] = {3, 5, 7, 9, 11, 12, 10, 8};
+    build_band_world(w);
 }
 /* geode: mineral richness bands 0..7 on a torus; facets glint in render */
 static void build_geode(void) {
-    const double w[] = {2, 3, 4, 5, 6, 8, 10, 12};
-    for (int i = 0; i < 8; i++) {
-        Tile *t = &tiles_[ntiles_++];
-        memset(t, 0, sizeof *t);
-        t->e[0] = t->e[1] = t->e[2] = t->e[3] = (uint8_t)(i << 4);
-        t->weight = t->wbase = w[i];
-    }
+    static const double w[8] = {2, 3, 4, 5, 6, 8, 10, 12};
+    build_band_world(w);
 }
 /* lantern festival: night-glow bands, brightest near the horizon */
 static void build_lantern(void) {
-    const double w[] = {14, 11, 8, 6, 5, 4, 3, 2};
-    for (int i = 0; i < 8; i++) {
-        Tile *t = &tiles_[ntiles_++];
-        memset(t, 0, sizeof *t);
-        t->e[0] = t->e[1] = t->e[2] = t->e[3] = (uint8_t)(i << 4);
-        t->weight = t->wbase = w[i];
-    }
+    static const double w[8] = {14, 11, 8, 6, 5, 4, 3, 2};
+    build_band_world(w);
 }
 /* dunes: sky bands up top, ridge shadow below */
 static void build_dunes(void) {
-    const double w[] = {10, 9, 8, 7, 6, 5, 4, 3};
-    for (int i = 0; i < 8; i++) {
-        Tile *t = &tiles_[ntiles_++];
-        memset(t, 0, sizeof *t);
-        t->e[0] = t->e[1] = t->e[2] = t->e[3] = (uint8_t)(i << 4);
-        t->weight = t->wbase = w[i];
-    }
+    static const double w[8] = {10, 9, 8, 7, 6, 5, 4, 3};
+    build_band_world(w);
 }
 /* reef: water depth bands, sunlit surface over the deep */
 static void build_reef(void) {
-    const double w[] = {4, 6, 8, 10, 11, 10, 8, 6};
-    for (int i = 0; i < 8; i++) {
-        Tile *t = &tiles_[ntiles_++];
-        memset(t, 0, sizeof *t);
-        t->e[0] = t->e[1] = t->e[2] = t->e[3] = (uint8_t)(i << 4);
-        t->weight = t->wbase = w[i];
-    }
+    static const double w[8] = {4, 6, 8, 10, 11, 10, 8, 6};
+    build_band_world(w);
 }
 /* stained: jewel panes; lead gathers where panes meet */
 static void build_stained(void) {
-    const double w[] = {9, 9, 9, 9, 9, 9, 9, 6};
-    for (int i = 0; i < 8; i++) {
-        Tile *t = &tiles_[ntiles_++];
-        memset(t, 0, sizeof *t);
-        t->e[0] = t->e[1] = t->e[2] = t->e[3] = (uint8_t)(i << 4);
-        t->weight = t->wbase = w[i];
-    }
+    static const double w[8] = {9, 9, 9, 9, 9, 9, 9, 6};
+    build_band_world(w);
 }
 /* city: altitude bands 0..7 - sky above, glowing streets below */
 static void build_city(void) {
-    const double w[] = {12, 10, 8, 6, 5, 5, 4, 3};
-    for (int i = 0; i < 8; i++) {
-        Tile *t = &tiles_[ntiles_++];
-        memset(t, 0, sizeof *t);
-        t->e[0] = t->e[1] = t->e[2] = t->e[3] = (uint8_t)(i << 4);
-        t->weight = t->wbase = w[i];
-    }
+    static const double w[8] = {12, 10, 8, 6, 5, 5, 4, 3};
+    build_band_world(w);
 }
 /* aurora: curtain-intensity bands, bright at the top of the sky */
 static void build_aurora(void) {
-    const double w[] = {3, 5, 8, 11, 13, 9, 4, 2};
-    for (int i = 0; i < 8; i++) {
-        Tile *t = &tiles_[ntiles_++];
-        memset(t, 0, sizeof *t);
-        t->e[0] = t->e[1] = t->e[2] = t->e[3] = (uint8_t)(i << 4);
-        t->weight = t->wbase = w[i];
-    }
+    static const double w[8] = {3, 5, 8, 11, 13, 9, 4, 2};
+    build_band_world(w);
 }
 /* matrix: rain-intensity bands; deep columns pour harder */
 static void build_matrix(void) {
-    const double w[] = {4, 7, 10, 12, 11, 8, 5, 3};
-    for (int i = 0; i < 8; i++) {
-        Tile *t = &tiles_[ntiles_++];
-        memset(t, 0, sizeof *t);
-        t->e[0] = t->e[1] = t->e[2] = t->e[3] = (uint8_t)(i << 4);
-        t->weight = t->wbase = w[i];
-    }
+    static const double w[8] = {4, 7, 10, 12, 11, 8, 5, 3};
+    build_band_world(w);
 }
 /* dungeon: edges 0=rock,1=wall-face,2=floor. rock may never touch floor
  * directly - a wall band must sit between them. torch variants on 1-wall tiles */
@@ -555,60 +562,15 @@ static void build_fire(void) {
 static void set_title(const char *mode);
 static void setup_mode(int idx) {
     g_mode_idx = ((idx % NMODES) + NMODES) % NMODES;
+    const ModeSpec *spec = mode_spec();
     ntiles_ = 0;
-    const char *m = MODES[g_mode_idx];
-    if (!strcmp(m, "terrain")) { build_terrain(); build_compat(true); }
-    else if (!strcmp(m, "truchet")) { build_truchet(); build_compat(false); }
-    else if (!strcmp(m, "fire")) { build_fire(); build_compat(true); }
-    else if (!strcmp(m, "waves")) { build_waves(); build_compat(true); }
-    else if (!strcmp(m, "dungeon")) { build_dungeon(); build_compat(false); }
-    else if (!strcmp(m, "maze")) { build_maze(); build_compat(false); }
-    else if (!strcmp(m, "galaxy")) { build_galaxy(); build_compat(true); }
-    else if (!strcmp(m, "city")) { build_city(); build_compat(true); }
-    else if (!strcmp(m, "aurora")) { build_aurora(); build_compat(true); }
-    else if (!strcmp(m, "matrix")) { build_matrix(); build_compat(true); }
-    else if (!strcmp(m, "pipes")) { build_pipes(); build_compat(false); }
-    else if (!strcmp(m, "mondrian")) { build_mondrian(); build_compat(true); }
-    else if (!strcmp(m, "koi")) { build_koi(); build_compat(true); }
-    else if (!strcmp(m, "lava")) { build_lava(); build_compat(true); }
-    else if (!strcmp(m, "sakura")) { build_sakura(); build_compat(true); }
-    else if (!strcmp(m, "geode")) { build_geode(); build_compat(true); }
-    else if (!strcmp(m, "lantern")) { build_lantern(); build_compat(true); }
-    else if (!strcmp(m, "dunes")) { build_dunes(); build_compat(true); }
-    else if (!strcmp(m, "reef")) { build_reef(); build_compat(true); }
-    else if (!strcmp(m, "stained")) { build_stained(); build_compat(true); }
-    else if (!strcmp(m, "streets")) { build_streets(); build_compat(false); }
-    else if (!strcmp(m, "neurons")) { build_neurons(); build_compat(false); }
-    else if (!strcmp(m, "mycelium")) { build_mycelium(); build_compat(false); }
-    else if (!strcmp(m, "delta")) { build_delta(); build_compat(false); }
-    else { build_circuit(); build_compat(false); }
-    g_torus = strcmp(MODES[g_mode_idx], "truchet") != 0;
-    /* fire keeps torus off too */
-    if (!strcmp(MODES[g_mode_idx], "fire") || !strcmp(MODES[g_mode_idx], "city") ||
-        !strcmp(MODES[g_mode_idx], "aurora") || !strcmp(MODES[g_mode_idx], "lava") ||
-        !strcmp(MODES[g_mode_idx], "sakura") || !strcmp(MODES[g_mode_idx], "lantern") ||
-        !strcmp(MODES[g_mode_idx], "dunes") || !strcmp(MODES[g_mode_idx], "reef") ||
-        !strcmp(MODES[g_mode_idx], "streets") || !strcmp(MODES[g_mode_idx], "delta"))
-        g_torus = false;
-    g_smooth = !strcmp(MODES[g_mode_idx], "terrain") ||
-               !strcmp(MODES[g_mode_idx], "fire") ||
-               !strcmp(MODES[g_mode_idx], "waves") ||
-               !strcmp(MODES[g_mode_idx], "galaxy") ||
-               !strcmp(MODES[g_mode_idx], "city") ||
-               !strcmp(MODES[g_mode_idx], "aurora") ||
-               !strcmp(MODES[g_mode_idx], "matrix") ||
-               !strcmp(MODES[g_mode_idx], "mondrian") ||
-               !strcmp(MODES[g_mode_idx], "koi") ||
-               !strcmp(MODES[g_mode_idx], "lava") ||
-               !strcmp(MODES[g_mode_idx], "sakura") ||
-               !strcmp(MODES[g_mode_idx], "geode") ||
-               !strcmp(MODES[g_mode_idx], "lantern") ||
-        !strcmp(MODES[g_mode_idx], "dunes") ||
-        !strcmp(MODES[g_mode_idx], "reef") ||
-               !strcmp(MODES[g_mode_idx], "stained");
+    spec->build();
+    build_compat(spec->smooth_compat);
+    g_torus = spec->torus;
+    g_smooth = spec->smooth_render;
     g_hero_on = false;
     apply_bias();
-    if (g_is_tty) set_title(MODES[g_mode_idx]);
+    if (g_is_tty) set_title(spec->name);
 }
 
 /* ---------------- colors fwd ---------------- */
@@ -819,7 +781,7 @@ static void grid_soft_reset(void) {
             dom_[i] = grid_cell_mask(i % W_, i / W_);
 }
 static bool bounded_connector_mode(void) {
-    const char *m = MODES[g_mode_idx];
+    const char *m = mode_name();
     return !g_torus && (!strcmp(m, "truchet") || !strcmp(m, "streets") ||
                         !strcmp(m, "neurons") || !strcmp(m, "mycelium") ||
                         !strcmp(m, "delta"));
@@ -835,14 +797,9 @@ static uint64_t grid_cell_mask(int x, int y) {
             if (x == W_ - 1 && tiles_[t].e[1]) m &= ~(1ULL << t);
         }
     }
-    bool fire_grad = !strcmp(MODES[g_mode_idx], "fire") || !strcmp(MODES[g_mode_idx], "city")
-                     || !strcmp(MODES[g_mode_idx], "aurora") || !strcmp(MODES[g_mode_idx], "lava")
-                     || !strcmp(MODES[g_mode_idx], "sakura") || !strcmp(MODES[g_mode_idx], "lantern")
-                     || !strcmp(MODES[g_mode_idx], "dunes") || !strcmp(MODES[g_mode_idx], "reef");
-    if (fire_grad) {
+    if (mode_spec()->band_ramp) {
         int tb = (int)(7.0 * (H_ - 1 - y) / (H_ > 1 ? H_ - 1 : 1));
-        if (!strcmp(MODES[g_mode_idx], "aurora")) tb = 7 - tb;
-        if (!strcmp(MODES[g_mode_idx], "lava") || !strcmp(MODES[g_mode_idx], "lantern")) tb = 7 - tb;
+        if (mode_spec()->ramp_flip) tb = 7 - tb;
         int lo = tb - 2 < 0 ? 0 : tb - 2, hi = tb + 2 > 7 ? 7 : tb + 2;
         for (int t = 0; t < ntiles_; t++) {
             int b = tiles_[t].e[0] >> 4;
@@ -858,7 +815,7 @@ static void grid_reset(void) {
         for (int x = 0; x < W_; x++) {
             dom_[IDX(x, y)] = grid_cell_mask(x, y);
         }
-    if (!strcmp(MODES[g_mode_idx], "koi")) koi_seed();
+    if (!strcmp(mode_name(), "koi")) koi_seed();
     memset(river_, 0, (size_t)W_ * H_);
     for (int i = 0; i < W_ * H_; i++) river_rank_[i] = -1;
     n_river_ = 0;
@@ -990,13 +947,13 @@ enum {
 };
 
 static bool macro_network_mode(void) {
-    const char *m = MODES[g_mode_idx];
+    const char *m = mode_name();
     return !strcmp(m, "streets") || !strcmp(m, "neurons") ||
            !strcmp(m, "mycelium") || !strcmp(m, "delta");
 }
 
 static const char *macro_name(void) {
-    const char *m = MODES[g_mode_idx];
+    const char *m = mode_name();
     if (!strcmp(m, "streets")) return "arterial-grid";
     if (!strcmp(m, "neurons")) return "soma-branches";
     if (!strcmp(m, "mycelium")) return "spore-tendrils";
@@ -1006,7 +963,7 @@ static const char *macro_name(void) {
 
 static int macro_role_at(int x, int y) {
     if (!macro_network_mode() || W_ <= 0 || H_ <= 0) return MACRO_NONE;
-    const char *m = MODES[g_mode_idx];
+    const char *m = mode_name();
     int dx = x - W_ / 2, dy = y - H_ / 2;
     int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
     uint32_t salt = (uint32_t)(g_seed ^ (g_seed >> 32));
@@ -1060,7 +1017,7 @@ static void macro_build(void) {
 static int macro_guided_cells(void) { return macro_guided_count_; }
 
 static int macro_target_degree(int role) {
-    const char *m = MODES[g_mode_idx];
+    const char *m = mode_name();
     if (!strcmp(m, "streets"))
         return role == MACRO_INTERSECTION ? 4 : 2;
     if (!strcmp(m, "neurons"))
@@ -1089,7 +1046,7 @@ static double macro_tile_bonus(int cell, int tile) {
 
 static double quality_tile_prior(int tile) {
     if (!macro_network_mode() || tile < 0 || tile >= ntiles_) return 0.0;
-    const char *m = MODES[g_mode_idx];
+    const char *m = mode_name();
     double ideal = !strcmp(m, "streets") ? 2.2 : !strcmp(m, "neurons") ? 2.0 :
                    !strcmp(m, "mycelium") ? 1.7 : 1.9;
     int degree = 0;
@@ -1191,7 +1148,7 @@ typedef struct {
 } QualityProfile;
 
 static QualityProfile quality_profile(void) {
-    const char *m = MODES[g_mode_idx];
+    const char *m = mode_name();
     if (!strcmp(m, "streets"))
         return (QualityProfile){"streets", 0.30, 0.18, 0.14, 0.08, 0.08, 0.06, 0.16};
     if (!strcmp(m, "neurons"))
@@ -1214,7 +1171,7 @@ static double quality_signed_clamp(double v) {
 }
 
 static bool quality_network_mode(void) {
-    const char *m = MODES[g_mode_idx];
+    const char *m = mode_name();
     return !strcmp(m, "circuit") || !strcmp(m, "truchet") ||
            !strcmp(m, "pipes") || !strcmp(m, "dungeon") ||
            !strcmp(m, "maze") || !strcmp(m, "streets") ||
@@ -1413,7 +1370,7 @@ static QualityMetrics quality_measure(bool final_map) {
     } else if (!active) {
         q.topology = decided ? 0.15 : 0.0;
     } else {
-        const char *m = MODES[g_mode_idx];
+        const char *m = mode_name();
         double ideal = !strcmp(m, "streets") ? 2.1 :
                        !strcmp(m, "neurons") ? 1.8 :
                        !strcmp(m, "mycelium") ? 1.6 :
@@ -1782,8 +1739,8 @@ static RGB biome_color(int tile) {
     return BIOMES[v >> 4][v & 15];
 }
 static RGB trace_color(int cx, int cy, double pulse) {
-    bool circ = !strcmp(MODES[g_mode_idx], "circuit");
-    bool pipes = !strcmp(MODES[g_mode_idx], "pipes");
+    bool circ = !strcmp(mode_name(), "circuit");
+    bool pipes = !strcmp(mode_name(), "pipes");
     if (g_comp_ready && (circ || pipes)) {
         int i = IDX(cx, cy);
         int tt = pc64(dom_[i]) == 1 ? (int)__builtin_ctzll(dom_[i]) : -1;
@@ -2049,7 +2006,7 @@ static bool g_entropy_view = false;
 static int g_hover_k = -1, g_hover_x = -1, g_hover_y = -1;
 /* returns true + color if an adjacent cell is a light source */
 static bool glow_neighbor(int wx, int wy, RGB *out) {
-    const char *mode = MODES[g_mode_idx];
+    const char *mode = mode_name();
     const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_truchet = !strcmp(mode, "truchet"), m_dungeon = !strcmp(mode, "dungeon"), m_city = !strcmp(mode, "city"), m_pipes = !strcmp(mode, "pipes");
     static const int DX[8] = {0, 1, 1, 1, 0, -1, -1, -1};
     static const int DY[8] = {-1, -1, 0, 1, 1, 1, 0, -1};
@@ -2192,7 +2149,7 @@ static void zen_capture(void) {
         if (!ghost_) { ghost_w_ = ghost_h_ = 0; return; }
     }
     ghost_w_ = W_; ghost_h_ = H_;
-    int art = strcmp(MODES[g_mode_idx], "terrain") ? 8 : 16;
+    int art = strcmp(mode_name(), "terrain") ? 8 : 16;
     for (int y = 0; y < H_; y++)
         for (int x = 0; x < W_; x++)
             ghost_[IDX(x, y)] = img_px(x, y, art / 2, art / 2, art);
@@ -2206,7 +2163,7 @@ static void zen_capture(void) {
 }
 
 static void paint_cell(int wx, int wy, int sub, double pulse) {
-    const char *mode = MODES[g_mode_idx];
+    const char *mode = mode_name();
     const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_truchet = !strcmp(mode, "truchet"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta");
     bool braille = !m_terrain;
             if (g_entropy_view && pc64(dom_[IDX(wx, wy)]) > 1) {
@@ -2760,7 +2717,7 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                             double dens = pow(frac, 1.7) * 0.38 + 0.015;
                             const RGB daa = {17, 14, 34}, dbb = {110, 110, 220};
                             /* mode-aware shimmer so the uncollapsed world stays in-character */
-                            const char *shm = MODES[g_mode_idx];
+                            const char *shm = mode_name();
                             RGB da = daa, db = dbb;
                             if (!strcmp(shm, "galaxy")) { da = (RGB){8, 10, 28}; db = (RGB){60, 80, 140}; }
                             else if (!strcmp(shm, "matrix")) { da = (RGB){4, 20, 8}; db = (RGB){0, 120, 60}; }
@@ -2880,7 +2837,7 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
 
 static void render_twin_frame(long stepsA, long stepsB, double pulse) {
     (void)stepsA; (void)stepsB;
-    const char *mode = MODES[g_mode_idx];
+    const char *mode = mode_name();
     bool braille = strcmp(mode, "terrain") != 0;
     fb_reset();
     fb_puts("\x1b[H");
@@ -2901,7 +2858,7 @@ static void render_twin_frame(long stepsA, long stepsB, double pulse) {
 
 static void render_quad_frame(long steps, double pulse) {
     (void)steps;
-    const char *mode = MODES[g_mode_idx];
+    const char *mode = mode_name();
     bool braille = strcmp(mode, "terrain") != 0;
     int sh = H_ * 2; /* screen rows */
     fb_reset();
@@ -2957,7 +2914,7 @@ static float height_at(float x, float y) {
     return a + (b - a) * ty;
 }
 static RGB rt_albedo(int band) {
-    const char *m = MODES[g_mode_idx];
+    const char *m = mode_name();
     if (!strcmp(m, "terrain")) {
         static const RGB t2[8] = {
             {18, 40, 68}, {28, 76, 116}, {50, 120, 150}, {150, 146, 104},
@@ -3157,7 +3114,7 @@ static void render_iso_frame(void) {
 
 static void render_frame(long steps, int attempts, double pulse) {
     (void)steps; (void)attempts;
-    const char *mode = MODES[g_mode_idx];
+    const char *mode = mode_name();
     bool braille = strcmp(mode, "terrain") != 0;
     int cw = braille ? 4 : 2, ch = braille ? 2 : 1;
     int vw = g_inf ? (W_ < g_fit_w ? W_ : g_fit_w) : W_;
@@ -3242,7 +3199,7 @@ static void render_frame(long steps, int attempts, double pulse) {
 
 /* ---------------- image sampling (shared by BMP + GIF export) ---------------- */
 static RGB img_px(int cx, int cy, int ix, int iy, int art) {
-    const char *mode = MODES[g_mode_idx];
+    const char *mode = mode_name();
     const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta");
     uint64_t d = dom_[IDX(cx, cy)];
     if (pc64(d) != 1) {
@@ -3494,7 +3451,7 @@ static bool image_dimensions(int art, int f, int *pw, int *ph) {
 }
 
 static bool save_bmp(const char *path) {
-    const char *mode = MODES[g_mode_idx];
+    const char *mode = mode_name();
     int art = strcmp(mode, "terrain") ? 8 : 16;
     int f = (strcmp(mode, "terrain") ? 6 : 4) * g_zoom;
     int pw, ph;
@@ -3706,7 +3663,7 @@ static void png_chunk_buf(Buf *o, const char *type, const uint8_t *data, uint32_
     buf_put(o, cb, 4);
 }
 static bool save_png(const char *path) {
-    const char *mode = MODES[g_mode_idx];
+    const char *mode = mode_name();
     int art = strcmp(mode, "terrain") ? 8 : 16;
     int f = (strcmp(mode, "terrain") ? 6 : 4) * g_zoom;
     int pw, ph;
@@ -3757,10 +3714,10 @@ static bool gallery_solve(int mode_idx, uint64_t seed, int w, int h) {
         }
         if (done) { solved = true; break; }
     }
-    if (solved && !strcmp(MODES[g_mode_idx], "terrain")) {
+    if (solved && !strcmp(mode_name(), "terrain")) {
         carve_rivers(); g_river_show = n_river_;
     }
-    if (solved && (!strcmp(MODES[g_mode_idx], "circuit") || !strcmp(MODES[g_mode_idx], "pipes")))
+    if (solved && (!strcmp(mode_name(), "circuit") || !strcmp(mode_name(), "pipes")))
         label_components();
     return solved;
 }
@@ -3807,7 +3764,7 @@ static void sheet_scan(void) {
         bool solved = gallery_solve(mi, 42, pw, ph);
         sheet_w[mi] = pw;
         sheet_h[mi] = ph;
-        int art = strcmp(MODES[mi], "terrain") ? 8 : 16;
+        int art = strcmp(MODESPEC[mi].name, "terrain") ? 8 : 16;
         for (int y = 0; y < ph; y++)
             for (int x = 0; x < pw; x++) {
                 int ix = art / 2, iy = art / 2;
@@ -3846,7 +3803,7 @@ static void render_sheet(void) {
         last_build = now_ms();
         sheet_scan();
     }
-    const char *mode = MODES[g_mode_idx];
+    const char *mode = mode_name();
     bool braille = strcmp(mode, "terrain") != 0;
     (void)braille;
     fb_reset();
@@ -3862,7 +3819,7 @@ static void render_sheet(void) {
         if (mi == g_mode_idx) fb_fg((RGB){74, 222, 128});
         else fb_fg((RGB){148, 163, 184});
         if (mi == g_mode_idx) fb_puts("\xe2\x96\xb8 ");
-        fb_puts(MODES[mi]);
+        fb_puts(MODESPEC[mi].name);
         for (int y = 0; y < sheet_h[mi]; y++) {
             snprintf(st, sizeof st, "\x1b[%d;%dH", py + 1 + y, px);
             fb_puts(st);
@@ -3880,7 +3837,7 @@ static void render_sheet(void) {
     fb_puts("\x1b[1;1H");
     fb_puts("  wfc sheet \xe2\x80\x94 all twenty-five worlds\xe2\x80\xa6 live\xe2\x80\xa6 (z to close) \xe2\x94\x82 [m]ode selected: ");
     fb_fg((RGB){74, 222, 128});
-    fb_puts(MODES[g_mode_idx]);
+    fb_puts(mode_name());
     frame_begin();
     fwrite(fb_, 1, fblen_, stdout);
     frame_end();
@@ -3907,27 +3864,27 @@ static bool run_gallery(const char *htmlpath) {
     for (int mi = 0; mi < NMODES; mi++)
         for (int si = 0; si < 3; si++) {
         bool solved = gallery_solve(mi, seeds[si], gw, gh);
-        int art = strcmp(MODES[mi], "terrain") ? 8 : 16;
-        int f = strcmp(MODES[mi], "terrain") ? 3 : 3;
+        int art = strcmp(MODESPEC[mi].name, "terrain") ? 8 : 16;
+        int f = strcmp(MODESPEC[mi].name, "terrain") ? 3 : 3;
         int pw, ph;
         uint8_t *rgb = raster_rgb(art, f, &pw, &ph);
         if (!rgb) {
-            fprintf(stderr, "gallery: raster allocation failed for %s\n", MODES[mi]);
+            fprintf(stderr, "gallery: raster allocation failed for %s\n", MODESPEC[mi].name);
             continue;
         }
         if (!solved) fprintf(stderr, "gallery: solver failed for %s seed %llu\n",
-                             MODES[mi], (unsigned long long)seeds[si]);
+                             MODESPEC[mi].name, (unsigned long long)seeds[si]);
         Buf img = png_bytes(rgb, pw, ph);
             free(rgb);
             char head[256];
             snprintf(head, sizeof head,
                      "<div class='card'><img alt='%s' src='data:image/png;base64,",
-                     MODES[mi]);
+                     MODESPEC[mi].name);
             buf_puts(&page, head);
             b64_append(&page, img.b, img.n);
             snprintf(head, sizeof head,
                      "'><div class='cap'><b>%s</b><span>seed %llu</span></div></div>",
-                     MODES[mi], (unsigned long long)seeds[si]);
+                     MODESPEC[mi].name, (unsigned long long)seeds[si]);
             buf_puts(&page, head);
             buf_free(&img);
             made++;
@@ -4045,7 +4002,7 @@ static void capture_frame(void) {
         g_frames = realloc(g_frames, (size_t)g_fcap * sizeof *g_frames);
         if (!g_frames) { perror("realloc"); exit(1); }
     }
-    int art = strcmp(MODES[g_mode_idx], "terrain") ? 8 : 16, f = 16 / art;
+    int art = strcmp(mode_name(), "terrain") ? 8 : 16, f = 16 / art;
     int pw = W_ * 16, ph = H_ * 16;
     uint8_t *rgb = malloc((size_t)pw * ph * 3);
     uint8_t *ixs = malloc((size_t)pw * ph);
@@ -4151,7 +4108,7 @@ static bool gfx_supported(void) {
 
 /* draw one full-res frame of the current grid as an inline image */
 static void emit_frame_img(void) {
-    int art = strcmp(MODES[g_mode_idx], "terrain") ? 8 : 16;
+    int art = strcmp(mode_name(), "terrain") ? 8 : 16;
     int raw_pw = W_ * (g_quad || g_twin ? 32 : 16);
     int raw_ph = H_ * (g_quad ? 32 : 16);
     int image_scale = 1;
@@ -4321,7 +4278,7 @@ static void play_stinger(int mode_idx) {
     if (!g_sound) return;
     ensure_sfx();
     char p[96];
-    snprintf(p, sizeof p, "/tmp/wfx_st_%s.wav", MODES[mode_idx]);
+    snprintf(p, sizeof p, "/tmp/wfx_st_%s.wav", MODESPEC[mode_idx].name);
     play_sfx(p);
 }
 
@@ -4344,7 +4301,7 @@ static void ambient_stop(void) {
 
 static void ensure_ambient(int mi) {
     char p[96];
-    snprintf(p, sizeof p, "/tmp/wfx_amb_%s.wav", MODES[mi]);
+    snprintf(p, sizeof p, "/tmp/wfx_amb_%s.wav", MODESPEC[mi].name);
     FILE *probe = fopen(p, "rb");
     if (probe) { fclose(probe); return; } /* already synthesized */
     const int SR = 44100;
@@ -4382,7 +4339,7 @@ static void ambient_update(void) {
         ambient_stop();
         ensure_ambient(g_mode_idx);
         char p[96];
-        snprintf(p, sizeof p, "/tmp/wfx_amb_%s.wav", MODES[g_mode_idx]);
+        snprintf(p, sizeof p, "/tmp/wfx_amb_%s.wav", mode_name());
         play_sfx(p);
         g_amb_mode = g_mode_idx;
         g_amb_t0 = now;
@@ -4390,7 +4347,7 @@ static void ambient_update(void) {
     }
     if (g_amb_t0 && now - g_amb_t0 > AMBIENT_MS) { /* seamless-ish retrigger */
         char p[96];
-        snprintf(p, sizeof p, "/tmp/wfx_amb_%s.wav", MODES[g_mode_idx]);
+        snprintf(p, sizeof p, "/tmp/wfx_amb_%s.wav", mode_name());
         play_sfx(p);
         g_amb_t0 = now;
     }
@@ -4434,8 +4391,8 @@ static void raw_on(void) {
 }
 
 static void term_fit_for(int term_cols, int term_rows) {
-    int cw = strcmp(MODES[g_mode_idx], "terrain") ? 4 : 2;
-    int ch = strcmp(MODES[g_mode_idx], "terrain") ? 2 : 1;
+    int cw = strcmp(mode_name(), "terrain") ? 4 : 2;
+    int ch = strcmp(mode_name(), "terrain") ? 2 : 1;
     int mw = 140, mh = 70; /* auto caps */
     if (term_cols > 8 && term_rows > 6) {
         if (term_cols / cw < mw) mw = term_cols / cw;
@@ -4655,7 +4612,7 @@ static bool thermo_launch(void) {
     signal(SIGPIPE, SIG_IGN);
 
     fprintf(thermo_in_, "{\"v\":1,\"t\":\"init\",\"mode\":");
-    thermo_json_string(thermo_in_, MODES[g_mode_idx]);
+    thermo_json_string(thermo_in_, mode_name());
     QualityProfile profile = quality_profile();
     fprintf(thermo_in_, ",\"w\":%d,\"h\":%d,\"ntiles\":%d,\"seed\":%llu,"
                      "\"torus\":%s,\"smooth\":%s,\"form\":\"%s\",\"learn\":%s,"
@@ -5078,7 +5035,7 @@ static void render_status(int vh, int ch) {
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
     char core[160], line[256];
-    const char *mode = MODES[g_mode_idx];
+    const char *mode = mode_name();
     const char *fit = g_fullscreen ? " FILL" : "";
     if (g_thermo) {
         const char *engine = thermo_ready_ ? thermo_sampler_ :
@@ -5125,7 +5082,7 @@ static bool save_report(const char *path) {
     fprintf(f, "{\"schema\":2,\"mode\":\"%s\",\"seed\":%llu,"
                "\"dimensions\":{\"w\":%d,\"h\":%d},\"solver\":\"%s\","
                "\"quality\":",
-            MODES[g_mode_idx], (unsigned long long)g_seed, W_, H_,
+            mode_name(), (unsigned long long)g_seed, W_, H_,
             g_thermo ? "thermo" : "classic");
     quality_json(f, q);
     fprintf(f, ",\"thermo\":{\"enabled\":%s,\"sampler\":",
@@ -5179,7 +5136,7 @@ static void render_observatory(void) {
     fb_puts("QUALITY OBSERVATORY\n\n");
     fb_fg((RGB){210, 220, 232});
     snprintf(line, sizeof line, "mode %-10s  focus %-10s  seed %llu  pins %d\n",
-             MODES[g_mode_idx], profile.focus, (unsigned long long)g_seed,
+             mode_name(), profile.focus, (unsigned long long)g_seed,
              studio_pin_count_);
     fb_puts(line);
     snprintf(line, sizeof line, "solver %-7s  sampler %-8s  learning %-5s  beta %.2f  confidence %.2f\n",
@@ -5238,7 +5195,7 @@ static void render_evolution_lab(void) {
     fb_puts("EVOLUTION LAB\n\n");
     fb_fg((RGB){220, 225, 235});
     snprintf(line, sizeof line, "mode %-10s  focus %-10s  base seed %llu\n",
-             MODES[g_mode_idx], quality_profile().focus,
+             mode_name(), quality_profile().focus,
              (unsigned long long)g_evolution_winner_seed);
     fb_puts(line);
     snprintf(line, sizeof line, "winner quality %.3f  hotspot (%d,%d) %s %.3f\n\n",
@@ -5332,7 +5289,7 @@ static bool hist_fwd(void) {
  * to cell over floor tiles; the torch field lights the world, and
  * standing next to a sconce lights it for the counter. */
 static void hero_spawn(void) {
-    if (strcmp(MODES[g_mode_idx], "dungeon") || g_nworlds > 1) { g_hero_on = false; return; }
+    if (strcmp(mode_name(), "dungeon") || g_nworlds > 1) { g_hero_on = false; return; }
     int best = -1, bd = 1 << 30;
     g_loot_tot = 0;
     for (int i = 0; i < W_ * H_; i++) {
@@ -5405,9 +5362,9 @@ static void fast_solve(void) {
     for (int i = 0; i < W_ * H_; i++)
         if (pc64(dom_[i]) != 1) { all_done = false; break; }
     if (all_done) {
-        if (!strcmp(MODES[g_mode_idx], "circuit") || !strcmp(MODES[g_mode_idx], "pipes"))
+        if (!strcmp(mode_name(), "circuit") || !strcmp(mode_name(), "pipes"))
             label_components();
-        if (!strcmp(MODES[g_mode_idx], "terrain")) {
+        if (!strcmp(mode_name(), "terrain")) {
             carve_rivers();
             g_river_show = n_river_;
         }
@@ -5523,8 +5480,8 @@ static char mouse_buf[32];
 static int mouse_len = 0;
 
 static void handle_click(int btn, int px, int py) {
-    int cw = strcmp(MODES[g_mode_idx], "terrain") ? 4 : 2;
-    int ch = strcmp(MODES[g_mode_idx], "terrain") ? 2 : 1;
+    int cw = strcmp(mode_name(), "terrain") ? 4 : 2;
+    int ch = strcmp(mode_name(), "terrain") ? 2 : 1;
     if (g_gfx) { cw = 16; ch = 16; } /* emit_frame_img renders 16 px/cell */
     int cx = (px - 1) / cw, cy = (py - 1) / ch;
     if (cx < 0 || cy < 0 || cx >= W_ || cy >= H_) return;
@@ -5743,8 +5700,8 @@ static int pump_keys(bool tty) {
                     } else if ((btn & 32) && (btn & 3) == 2) {
                         handle_click(2, mx, my);
                     } else if (btn & 32) { /* hover readout */
-                        int cw2 = strcmp(MODES[g_mode_idx], "terrain") ? 4 : 2;
-                        int ch2 = strcmp(MODES[g_mode_idx], "terrain") ? 2 : 1;
+                        int cw2 = strcmp(mode_name(), "terrain") ? 4 : 2;
+                        int ch2 = strcmp(mode_name(), "terrain") ? 2 : 1;
                         if (g_gfx) { cw2 = 8; ch2 = 1; }
                         int hx = (mx - 1) / cw2, hy = (my - 1) / ch2;
                         int qcol = g_quad ? (hx >= W_) : (g_twin && hx >= W_);
@@ -5862,7 +5819,7 @@ static int pump_keys(bool tty) {
         }
         else if (c == 'y') {
             g_theme++;
-            if ((g_theme & 7) >= 4 && strcmp(MODES[g_mode_idx], "terrain")) g_theme = (g_theme & 7) >= 6 ? 0 : 4;
+            if ((g_theme & 7) >= 4 && strcmp(mode_name(), "terrain")) g_theme = (g_theme & 7) >= 6 ? 0 : 4;
             BIOMES = BIOMES_SEASONAL[(g_theme & 7) >= 4 ? (g_theme & 7) - 4 : 0];
             set_note("theme %d", (g_theme & 7) + 1);
         }
@@ -5899,7 +5856,7 @@ static int pump_keys(bool tty) {
             else if (g_paused) { g_paused = false; hist_pos_ = -1; set_note("live collapse"); }
         }
         else if (c == 'w' || c == 'a' || c == 's' || c == 'd') {
-            if (g_hero_on && !strcmp(MODES[g_mode_idx], "dungeon")) hero_move(c);
+            if (g_hero_on && !strcmp(mode_name(), "dungeon")) hero_move(c);
         }
         else if (c == 'k') { g_crt = !g_crt; set_note("CRT %s", g_crt ? "on" : "off"); }
         else if (c == 'W') {
@@ -5989,7 +5946,7 @@ static int pump_keys(bool tty) {
         }
         else if (c == 'o') {
             char code[96], cmd[160];
-            snprintf(code, sizeof code, "wfc://%s/%llu", MODES[g_mode_idx],
+            snprintf(code, sizeof code, "wfc://%s/%llu", mode_name(),
                      (unsigned long long)g_seed);
 #ifdef __APPLE__
             snprintf(cmd, sizeof cmd, "echo -n '%s' | pbcopy", code);
@@ -5998,7 +5955,7 @@ static int pump_keys(bool tty) {
             set_note("%s (copied)", code);
         }
         else if (c == 'v') {
-            const char *mode2 = MODES[g_mode_idx];
+            const char *mode2 = mode_name();
             int art2 = strcmp(mode2, "terrain") ? 8 : 16;
             int f2 = strcmp(mode2, "terrain") ? 6 : 4;
             int pw2, ph2;
@@ -6070,7 +6027,7 @@ static int pump_keys(bool tty) {
         else if (c == 's') {
             char path[512];
             if (!g_save_path[0])
-                snprintf(path, sizeof path, "wfc-%s-%llu.png", MODES[g_mode_idx],
+                snprintf(path, sizeof path, "wfc-%s-%llu.png", mode_name(),
                          (unsigned long long)(g_seed % 100000000ULL));
             else snprintf(path, sizeof path, "%s", g_save_path);
             if (save_image(path)) set_note("saved %s (%dx%d)", path, W_, H_);
@@ -6157,7 +6114,7 @@ static bool parse_seed_value(const char *text, uint64_t *out) {
 static int find_mode(const char *name) {
     if (!name) return -1;
     for (int i = 0; i < NMODES; i++)
-        if (!strcmp(name, MODES[i])) return i;
+        if (!strcmp(name, MODESPEC[i].name)) return i;
     return -1;
 }
 
@@ -6206,7 +6163,7 @@ static void cfg_save(void) {
     FILE *f = fopen(p, "w");
     if (!f) return;
     fprintf(f, "mode=%s\ntheme=%d\nspeed=%ld\nbias=%d\nsound=%d\ncrt=%d\nzen=%d\n",
-            MODES[g_mode_idx], g_theme & 7, g_speed,
+            mode_name(), g_theme & 7, g_speed,
             (int)(g_bias * 1000), (int)g_sound, (int)g_crt, (int)g_zen);
     fclose(f);
 }
@@ -6222,11 +6179,11 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--mode")) {
             const char *m = NEXTV();
             int found = -1;
-            for (int k = 0; k < NMODES; k++) if (!strcmp(m, MODES[k])) found = k;
+            for (int k = 0; k < NMODES; k++) if (!strcmp(m, MODESPEC[k].name)) found = k;
             if (found < 0) {
                 fputs("mode must be one of:", stderr);
                 for (int k = 0; k < NMODES; k++)
-                    fprintf(stderr, "%s%s", k % 6 ? " " : "\n  ", MODES[k]);
+                    fprintf(stderr, "%s%s", k % 6 ? " " : "\n  ", MODESPEC[k].name);
                 fputc('\n', stderr);
                 return 2;
             }
@@ -6333,7 +6290,7 @@ int main(int argc, char **argv) {
             g_theme = (int)value;
         }
         else if (!strcmp(argv[i], "--list-modes")) {
-            for (int k = 0; k < NMODES; k++) printf("%s\n", MODES[k]);
+            for (int k = 0; k < NMODES; k++) printf("%s\n", MODESPEC[k].name);
             return 0;
         }
         else if (!strcmp(argv[i], "--twin")) { g_twin = true; g_nworlds = 2; }
@@ -6377,11 +6334,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             printf("wave function collapse, animated in your terminal\n\n"
                    "  --mode NAME                      tileset, one of %d worlds:\n", NMODES);
-            /* wrapped straight from MODES[], so --help cannot go stale */
+            /* wrapped straight from the registry, so --help cannot go stale */
             for (int m = 0; m < NMODES; m += 6) {
                 fputs("                                   ", stdout);
                 for (int k = m; k < m + 6 && k < NMODES; k++)
-                    printf("%s%s", k > m ? " " : "", MODES[k]);
+                    printf("%s%s", k > m ? " " : "", MODESPEC[k].name);
                 fputc('\n', stdout);
             }
             printf("  --w N --h N                      grid cells (default: auto-fit window)\n"
@@ -6448,7 +6405,7 @@ int main(int argc, char **argv) {
         uint8_t *big = calloc((size_t)W3 * H3, 3);
         if (!big) { perror("malloc"); return 1; }
         for (int mi = 0; mi < NMODES; mi++) {
-            bool is_terrain = !strcmp(MODES[mi], "terrain");
+            bool is_terrain = !strcmp(MODESPEC[mi].name, "terrain");
             int art = is_terrain ? 16 : 8, f = 8 / (art / 8);
             (void)gallery_solve(mi, 42, pw, ph);
             int px = (mi % collage_cols) * pxs, py = (mi / collage_cols) * pys;
@@ -6495,7 +6452,7 @@ int main(int argc, char **argv) {
                 if (st != W_ * H_) fails++;
                 tot_steps += W_ * H_;
             }
-            printf("%-9s %8d %10ld %8.1f %7d\n", MODES[mi], N,
+            printf("%-9s %8d %10ld %8.1f %7d\n", MODESPEC[mi].name, N,
                    tot_steps / N, tot_ms / N, fails);
         }
         return 0;
@@ -6577,13 +6534,13 @@ int main(int argc, char **argv) {
         }
         char gp[512];
         if (g_nworlds == 1) {
-            if (!strcmp(MODES[g_mode_idx], "circuit") || !strcmp(MODES[g_mode_idx], "pipes")) label_components();
-            if (!strcmp(MODES[g_mode_idx], "terrain")) { carve_rivers(); g_river_show = n_river_; }
+            if (!strcmp(mode_name(), "circuit") || !strcmp(mode_name(), "pipes")) label_components();
+            if (!strcmp(mode_name(), "terrain")) { carve_rivers(); g_river_show = n_river_; }
         }
         if (g_gif_on) {
             capture_frame();
             if (g_gif_path[0]) snprintf(gp, sizeof gp, "%s", g_gif_path);
-            else snprintf(gp, sizeof gp, "wfc-%s-%llu.gif", MODES[g_mode_idx],
+            else snprintf(gp, sizeof gp, "wfc-%s-%llu.gif", mode_name(),
                           (unsigned long long)(g_seed % 100000000ULL));
             if (!write_gif(gp)) {
                 frames_clear();
@@ -6622,7 +6579,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         printf("OK mode=%s %dx%d seed=%llu tries=%d steps=%ld%s%s%s%s%s%s\n",
-               MODES[g_mode_idx], W_, H_, (unsigned long long)g_seed, tries, total,
+               mode_name(), W_, H_, (unsigned long long)g_seed, tries, total,
                g_save_path[0] ? " saved=" : "", g_save_path[0] ? g_save_path : "",
                g_gif_on ? " gif=" : "", g_gif_on ? gp : "",
                g_report_path[0] ? " report=" : "", g_report_path[0] ? g_report_path : "");
@@ -6767,10 +6724,10 @@ inf_continue:
         if (r == 1) { /* solved */
             if (getenv("WFC_DEBUG")) { FILE *df=fopen("/tmp/wfc_dbg.log","a"); if(df){fprintf(df,"[solved inf=%d size %dx%d]\n",(int)g_inf,W_,H_); fclose(df);} }
             if (g_sound) { ensure_sfx(); play_sfx("/tmp/wfc_done.wav"); }
-            int is_terrain = !strcmp(MODES[g_mode_idx], "terrain");
+            int is_terrain = !strcmp(mode_name(), "terrain");
             load_world(0);
             quality_record(quality_measure(true));
-            if ((!strcmp(MODES[g_mode_idx], "circuit") || !strcmp(MODES[g_mode_idx], "pipes")) && !g_stop && g_nworlds == 1) label_components();
+            if ((!strcmp(mode_name(), "circuit") || !strcmp(mode_name(), "pipes")) && !g_stop && g_nworlds == 1) label_components();
             if (is_terrain && !g_stop && g_nworlds == 1) {
                 if (g_inf) rivers_clear();
                 carve_rivers();
@@ -6782,7 +6739,7 @@ inf_continue:
                 }
                 g_river_show = n_river_;
             }
-            if (!strcmp(MODES[g_mode_idx], "dungeon") && !g_stop) hero_spawn();
+            if (!strcmp(mode_name(), "dungeon") && !g_stop) hero_spawn();
             if (g_gif_on) {
                 if (g_zen && !g_inf) {
                     /* zen: keep rolling across morphs; one big loop written on quit */
@@ -6792,7 +6749,7 @@ inf_continue:
                     capture_frame();
                     char gp[512];
                     if (g_gif_path[0]) snprintf(gp, sizeof gp, "%s", g_gif_path);
-                    else snprintf(gp, sizeof gp, "wfc-%s-%llu.gif", MODES[g_mode_idx],
+                    else snprintf(gp, sizeof gp, "wfc-%s-%llu.gif", mode_name(),
                                   (unsigned long long)(g_seed % 100000000ULL));
                     bool gif_ok = write_gif(gp);
                     frames_clear();
@@ -6810,8 +6767,8 @@ inf_continue:
                 else set_note("report failed: %s", g_report_path);
             }
             double t0 = now_ms();
-            bool anim = !strcmp(MODES[g_mode_idx], "fire") || !strcmp(MODES[g_mode_idx], "waves")
-                        || !strcmp(MODES[g_mode_idx], "galaxy") || !strcmp(MODES[g_mode_idx], "city") || !strcmp(MODES[g_mode_idx], "aurora");
+            bool anim = !strcmp(mode_name(), "fire") || !strcmp(mode_name(), "waves")
+                        || !strcmp(mode_name(), "galaxy") || !strcmp(mode_name(), "city") || !strcmp(mode_name(), "aurora");
             double linger = anim ? 4500 : 1800;
             while (!g_stop && now_ms() - t0 < linger) {
                 pump_keys(true);
@@ -6849,7 +6806,7 @@ inf_continue:
                 full_repaint_ = true;
                 g_paused = false;
                 apply_size();
-                set_note("%s", MODES[g_mode_idx]);
+                set_note("%s", mode_name());
                 play_stinger(g_mode_idx);
             }
         }
