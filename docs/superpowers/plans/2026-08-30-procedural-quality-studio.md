@@ -91,7 +91,7 @@
 - [x] Add a CLI/report test for zero pins and a source/runtime contract test for the new pin control.
 - [x] Run the focused test and confirm it fails before production changes.
 - [x] Implement pin state, marker rendering, reset/cleanup, and backwards-compatible save/load.
-- [x] Run focused tests, strict compilation, and an interactive pin/undo smoke test.
+- [x] Run focused tests, strict compilation, and the C pin/undo harness; smoke-test the Observatory in Terminal.app.
 
 ### Task 5: Add and polish the `delta` world
 
@@ -121,6 +121,6 @@
 - [x] Run `make strict`, `make test`, `make regression`, `make python-check`, `make learning-check`, `make protocol-check`, `make bridge-check`, `make quality-check`, `make studio-check`, and `make fuzz` fresh on the final tree.
 - [x] Run the report, delta, thermo, pin, reset, and no-learn checks independently and inspect exit codes/output.
 - [x] Run a security review of the final diff and resolve any actionable finding.
-- [ ] Commit the verified work on `codex/adaptive-thermo` and push it to `origin`.
-- [ ] Launch a fresh latest build only through macOS Terminal.app and leave it open for testing.
-- [ ] Report exact verification evidence, commit/push state, Terminal.app launch, and any remaining limitations.
+- [x] Commit the verified work on `codex/adaptive-thermo` and push it to `origin`.
+- [x] Launch a fresh latest build only through macOS Terminal.app and leave it open for testing.
+- [x] Report exact verification evidence, commit/push state, Terminal.app launch, and any remaining limitations.
