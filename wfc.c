@@ -28,6 +28,7 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <math.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -4954,6 +4955,15 @@ static bool thermo_apply_cfg(const char *s) {
     return true;
 }
 
+/* Sleep until the worker has a line for us, or `ms` elapses. Headless runs
+ * have no frame to draw between rounds, so a fixed usleep() spent most of the
+ * solve waiting on a child that had already answered. */
+static void thermo_wait_readable(int ms) {
+    if (thermo_fd_ < 0) { usleep((useconds_t)ms * 1000); return; }
+    struct pollfd pfd = {.fd = thermo_fd_, .events = POLLIN, .revents = 0};
+    if (poll(&pfd, 1, ms) < 0 && errno != EINTR) usleep((useconds_t)ms * 1000);
+}
+
 /* Poll the long-lived thermo worker: 0 in progress, 1 solved, -1 failed. */
 static char *thermo_lbuf = NULL;
 static size_t thermo_lbl = 0, thermo_lcap = 0;
@@ -6545,7 +6555,7 @@ int main(int argc, char **argv) {
                     int rs = thermo_poll();
                     if (rs == 1) { done = 1; break; }
                     if (rs == -1) { g_thermo = false; break; }
-                    usleep(30000);
+                    thermo_wait_readable(250);
                 }
                 continue; /* thermo run still counts as one try */
             }

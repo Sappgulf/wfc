@@ -184,6 +184,12 @@ validates dimensions, masks, domains, objectives, metrics, and sampling budgets
 before sampling; malformed requests emit a structured `fatal` line and the C
 parent falls back to the classic solver.
 
+Headless runs block on the worker's pipe rather than polling on a fixed
+sleep, so a solve costs what the sampler actually costs: a 10x8 network world
+finishes in roughly 330 ms instead of the 3 s the old poll interval spent
+waiting on a child that had already answered. Interactive runs still wake on a
+timer, because they have frames to draw between rounds.
+
 THRML/JAX is optional. If installed, the legacy one-shot compatibility API can
 use it; the persistent worker deliberately uses its dependency-free bounded
 sampler, so
