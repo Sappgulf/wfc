@@ -155,6 +155,9 @@ undecided cell on every step. It is now cached against the domain mask it was
 computed from, which cut the slowest world from 40ms to 4.1ms for a 48x30
 grid without changing a single generated map.
 
+`--solver thermo` works with `--infinite` too: the world regrows, and the
+worker is re-initialised against the new one.
+
 Headless runs are intentionally bounded: `--twin`, `--quad`, and
 `--infinite` require an interactive terminal. Numeric options are validated
 and rejected with exit code 2 when malformed or out of range; `--seed 0` is a

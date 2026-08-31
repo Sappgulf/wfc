@@ -5287,6 +5287,10 @@ static size_t thermo_snap_cap_ = 0;
 static uint64_t *thermo_try_ = NULL;
 static size_t thermo_try_cap_ = 0;
 
+/* the reader's partial-line buffer; a kill has to clear it, see below */
+static char *thermo_lbuf = NULL;
+static size_t thermo_lbl = 0, thermo_lcap = 0;
+
 static void thermo_kill(void) {
     if (thermo_in_) { fclose(thermo_in_); thermo_in_ = NULL; thermo_in_fd_ = -1; }
     if (thermo_fp_) { fclose(thermo_fp_); thermo_fp_ = NULL; thermo_fd_ = -1; }
@@ -5302,6 +5306,12 @@ static void thermo_kill(void) {
     /* the guard's scratch grids are sized to a world that is now gone */
     free(thermo_snap_); thermo_snap_ = NULL; thermo_snap_cap_ = 0;
     free(thermo_try_);  thermo_try_ = NULL;  thermo_try_cap_ = 0;
+    /* Drop whatever half a line the dead worker left behind. Without this the
+     * next worker's first bytes are appended to that stale prefix and parse as
+     * one spliced frame — which is how a relaunch after --infinite grew the
+     * world produced a cfg of the wrong length and failed the whole solver.
+     * Any relaunch hits this: toggling T off and on, or --reset-learning. */
+    thermo_lbl = 0;
 }
 
 static void thermo_json_string(FILE *f, const char *s) {
@@ -5319,11 +5329,11 @@ static void thermo_json_string(FILE *f, const char *s) {
 
 static char g_argv0[512] = "wfc";
 static bool thermo_launch(void) {
-    /* --infinite regrows the grid mid-run, which invalidates the spec the
-     * worker was initialised against. Re-initialising it on each grow very
-     * nearly works, but fails intermittently in a way I could not pin down,
-     * so the guard stays until it can be made reliable. */
-    if (g_gallery_path[0] || g_collage_path[0] || g_nworlds > 1 || g_inf) return false;
+    /* --twin/--quad run one mode across several rng streams, so a sidecar per
+     * world would contend over a single profile file. --infinite is one world
+     * and one profile: it regrows the grid, and the worker is re-initialised
+     * against the new one. */
+    if (g_gallery_path[0] || g_collage_path[0] || g_nworlds > 1) return false;
     if (getenv("WFC_NO_THERMO")) return false;
     char py[512];
     const char *pyp = getenv("WFC_THERMO_PY");
@@ -5791,8 +5801,6 @@ static void thermo_wait_readable(int ms) {
 }
 
 /* Poll the long-lived thermo worker: 0 in progress, 1 solved, -1 failed. */
-static char *thermo_lbuf = NULL;
-static size_t thermo_lbl = 0, thermo_lcap = 0;
 static int thermo_poll(void) {
     if (!thermo_inflight_) {
         set_note("thermo: launching THRML\xe2\x80\xa6");
@@ -5902,14 +5910,22 @@ thermo_fail:
     return -1;
 }
 
+/* The HUD accent used to come from a table of eight, wrapped by mode index,
+ * so every eighth world shared a colour and a new world inherited whichever
+ * slot it landed in. It is derived from the world's own identity instead: the
+ * chromatic circle of its key mapped onto the colour wheel, its family in the
+ * saturation, its octave in the brightness. Each world gets its own, and none
+ * of it can go stale. */
 static RGB mode_accent(void) {
-    static const RGB accents[] = {
-        {110, 220, 255}, {255, 194, 98}, {255, 132, 154}, {168, 235, 128},
-        {206, 166, 255}, {105, 232, 207}, {255, 164, 96}, {160, 180, 255}
-    };
-    int index = g_mode_idx < 0 ? 0 : g_mode_idx;
-    index %= (int)(sizeof accents / sizeof accents[0]);
-    return accents[index];
+    const ModeSpec *spec = mode_spec();
+    int semi = ((spec->tone % 12) + 12) % 12;
+    int octave = 2 + (spec->tone - semi) / 12;
+    double hue = semi * 30.0;
+    double sat = spec->group == MG_CONNECTOR ? 0.58
+               : spec->group == MG_CARVE     ? 0.44
+                                             : 0.70;
+    double val = 0.74 + 0.07 * (octave < 1 ? 1 : octave > 4 ? 4 : octave);
+    return hsv(hue, sat, val > 1.0 ? 1.0 : val);
 }
 
 static const char *thermo_phase(void) {
@@ -7092,8 +7108,8 @@ static int pump_keys(bool tty) {
             req = 1;
         }
         else if (c == 'T') {
-            if (g_nworlds > 1 || g_inf)
-                set_note("thermo: single-world, fixed-size only");
+            if (g_nworlds > 1)
+                set_note("thermo: --twin/--quad would share one profile");
             else {
                 g_thermo = !g_thermo;
                 thermo_kill();
@@ -7542,10 +7558,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "--infinite cannot be combined with --twin or --quad\n");
         return 2;
     }
-    if (g_thermo && (g_nworlds > 1 || g_inf)) {
-        fprintf(stderr, "--solver thermo needs one fixed-size world: --twin and --quad run a\n"
-                "single mode across several rng streams and would share one profile,\n"
-                "and --infinite regrows the grid the worker was initialised against\n");
+    if (g_thermo && g_nworlds > 1) {
+        fprintf(stderr, "--solver thermo cannot be combined with --twin or --quad: they run one\n"
+                "mode across several rng streams and would share a single profile\n");
         return 2;
     }
     if (g_evolve_count && (g_thermo || g_nworlds > 1 || g_inf ||
@@ -7933,8 +7948,16 @@ inf_continue:
                         || !strcmp(mode_name(), "fire") || !strcmp(mode_name(), "waves")
                         || !strcmp(mode_name(), "galaxy") || !strcmp(mode_name(), "city") || !strcmp(mode_name(), "aurora");
             double linger = anim ? 4500 : 1800;
+            bool cut_short = false;
             while (!g_stop && now_ms() - t0 < linger) {
-                pump_keys(true);
+                /* The return value used to be dropped here, so every key that
+                 * asks for something — q to quit, space for a new world, m for
+                 * the next one — was swallowed for the whole linger while the
+                 * finished world sat on screen. It reads as the app ignoring
+                 * you, because it is. */
+                int lreq = pump_keys(true);
+                if (lreq == 2) { g_stop = 1; break; }
+                if (lreq == 1) { cut_short = true; break; }
                 if (g_paused) { msleep(30); continue; }
                 if (g_pan) { g_vx = (g_vx + 1) % W_; }
                 if (g_pan) { g_vx = (g_vx + 1) % W_; }
@@ -7949,12 +7972,15 @@ inf_continue:
                     render_frame(steps, attempts, 0.68 + 0.32 * sin((now_ms() - t0) * 0.006));
                 msleep(33);
             }
+            if (cut_short) continue;      /* the user asked to move on */
             if (g_zen && !g_inf && g_nworlds == 1 && !g_stop) {
                 zen_capture(); /* solved world lingers; the next one dissolves in */
                 if (!g_cycle) g_seed = rnd();
             }
             if (g_inf && !g_stop) {
                 if (world_grow()) {
+                    /* the worker's spec is bound to the old dimensions */
+                    if (g_thermo) thermo_kill();
                     set_note("world grew to %dx%d", W_, H_);
                     msleep(500);
                     /* continue same attempt: skip reset via marker */

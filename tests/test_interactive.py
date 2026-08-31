@@ -34,8 +34,10 @@ class Session:
         self.pid, self.fd = pty.fork()
         if self.pid == 0:                       # child
             os.chdir(ROOT)
+            size = ["--w", "6", "--h", "5"] if "--infinite" in args else \
+                   ["--w", "40", "--h", "20"]
             os.execve(str(BINARY), [str(BINARY), "--mode", "circuit",
-                                    "--w", "40", "--h", "20", *args],
+                                    *size, *args],
                       sandbox.env())
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ,
                     struct.pack("HHHH", rows, cols, 0, 0))
@@ -62,6 +64,24 @@ class Session:
         os.write(self.fd, keys)
         time.sleep(wait)
         return self.drain(0.4)
+
+    def send_until(self, keys, predicate, timeout=12.0):
+        """Send keys, then read until the screen satisfies `predicate`.
+
+        Fixed sleeps made this suite pass alone and fail inside `make check`,
+        where the sanitiser sweep and benchmarks are competing for the machine
+        — the app simply had not redrawn yet. Waiting on the screen instead of
+        on the clock is both reliable under load and quicker when idle.
+        """
+        self.drain(0.05)
+        os.write(self.fd, keys)
+        seen = b""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            seen += self.drain(0.3)
+            if predicate(seen):
+                return seen + self.drain(0.2)
+        return seen
 
     def alive(self):
         try:
@@ -113,16 +133,17 @@ class InteractiveTests(unittest.TestCase):
 
     def test_picker_filters_and_previews_the_selected_world(self):
         self.session = Session()
-        opened = self.session.send(b"/")
+        opened = self.session.send_until(b"/", lambda o: preview_label(o) == "circuit")
         self.assertIn("PICK A WORLD", plain(opened))
         self.assertEqual(preview_label(opened), "circuit",
                          "picker opens on the current world")
 
-        moved = self.session.send(ESC + b"[B")
+        moved = self.session.send_until(ESC + b"[B",
+                                        lambda o: preview_label(o) == "terrain")
         self.assertEqual(preview_label(moved), "terrain",
                          "down arrow must move the selection")
 
-        typed = self.session.send(b"rail")
+        typed = self.session.send_until(b"rail", lambda o: "search: rail" in plain(o))
         text = plain(typed)
         self.assertIn("search: rail", text)
         self.assertIn("1/33 worlds", text)
@@ -130,16 +151,18 @@ class InteractiveTests(unittest.TestCase):
 
     def test_picker_selects_on_enter_and_cancels_on_escape(self):
         self.session = Session()
-        self.session.send(b"/")
-        self.session.send(b"vin")
-        chosen = self.session.send(b"\r", wait=1.6)
+        self.session.send_until(b"/", lambda o: "PICK A WORLD" in plain(o))
+        self.session.send_until(b"vin", lambda o: "search: vin" in plain(o))
+        chosen = self.session.send_until(
+            b"\r", lambda o: "PICK A WORLD" not in last_screen(o))
         self.assertNotIn("PICK A WORLD", last_screen(chosen),
                          "enter must close the picker")
         self.assertIn("vinyl", plain(chosen), "enter switches to the world")
 
-        reopened = self.session.send(b"/")
+        reopened = self.session.send_until(b"/", lambda o: "PICK A WORLD" in plain(o))
         self.assertIn("PICK A WORLD", plain(reopened))
-        cancelled = self.session.send(ESC, wait=1.4)
+        cancelled = self.session.send_until(
+            ESC, lambda o: "PICK A WORLD" not in last_screen(o))
         self.assertNotIn("PICK A WORLD", last_screen(cancelled),
                          "escape must close the picker")
 
@@ -147,13 +170,54 @@ class InteractiveTests(unittest.TestCase):
         """ESC used to strand the reader in the mouse state machine."""
         self.session = Session()
         self.session.send(ESC + b"[A" + ESC + b"[D", wait=0.8)
-        after = self.session.send(b"/")
+        after = self.session.send_until(b"/", lambda o: "PICK A WORLD" in plain(o))
         self.assertIn("PICK A WORLD", plain(after),
                       "a key after an arrow must still register")
 
+    def test_thermo_survives_an_infinite_world_growing(self):
+        """A relaunched worker must not inherit the dead one's half-line.
+
+        thermo_kill() left the reader's partial-line buffer intact, so the
+        next worker's first bytes were appended to that stale prefix and
+        parsed as one spliced frame. After --infinite grew the world that
+        produced a config of the wrong length and failed the solver outright.
+        Every relaunch hits the same path — toggling T, --reset-learning.
+        """
+        self.session = Session("--solver", "thermo", "--infinite",
+                               "--speed", "20000")
+        seen = b""
+        deadline = time.time() + 45
+        while time.time() < deadline and "grew to" not in plain(seen):
+            seen += self.session.drain(1.0)
+        text = plain(seen)
+        self.assertIn("grew to", text, "the world never grew; test proved nothing")
+        self.assertNotIn("thermo failed", text)
+
+    def test_q_quits_while_a_finished_world_is_lingering(self):
+        """Keys were dropped for the whole post-solve linger.
+
+        That loop pumped the keyboard but discarded what it returned, so q,
+        space and m did nothing at all while a finished world sat on screen —
+        up to 4.5 seconds of the app appearing to ignore you. At a high speed
+        the solve lands almost immediately, so this presses q right into it.
+        """
+        self.session = Session("--speed", "20000")
+        self.session.drain(0.4)
+        os.write(self.session.fd, b"q")
+        deadline = time.time() + 8
+        while time.time() < deadline and self.session.alive():
+            self.session.drain(0.15)
+        self.assertFalse(self.session.alive(), "q must exit during the linger")
+
     def test_q_quits(self):
         self.session = Session()
-        self.session.send(b"q", wait=1.5)
+        self.session.drain(0.2)
+        os.write(self.session.fd, b"q")
+        # keep reading while waiting: a full pty buffer blocks the app's
+        # writes, and an app blocked on write never gets back to the keys
+        deadline = time.time() + 10
+        while time.time() < deadline and self.session.alive():
+            self.session.drain(0.2)
         self.assertFalse(self.session.alive(), "q must exit")
 
 
