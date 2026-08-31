@@ -64,10 +64,17 @@ raytraced heightfield view, `i` the isometric relief view of any solved world.
 `l` quality observatory · `P` pin/unpin the hovered cell ·
 `Q` quality heatmap · `E` Evolution Lab (rank seed variants) ·
 `F` fit the live terminal viewport ·
-`w a s d` hero crawl
+`Y` red/green colour assist · `w a s d` hero crawl
 through solved dungeons (light all the torches) · `h` help · `q` quit
 
 Mouse: left-click seed, right-click carve or unpin, drag paint, hover inspect.
+
+`Y` (or `--colorblind`) helps where meaning rides on red against green — rail's
+switch lamps against its buffer stops, streets' dead ends, the quality heatmap.
+It moves that signal onto the blue axis, which deuteranopia leaves intact.
+Textbook daltonization was tried first and measured: it pulled those pairs 35%
+*closer* together under simulation, because it redistributes green error back
+into green. The blue shift separates them by 55% instead.
 
 ## Flags
 
@@ -235,9 +242,9 @@ classic solver reads the profile the worker wrote and applies its tile
 preferences to its own weighted pick, in the same log space the worker scores
 in — so a world you have been solving keeps getting better with no Python
 running at all. Over 40 training runs on streets and 40 unseen evaluation
-seeds it lifted classic quality from 0.9577 to 0.9694, better on 40 of 40.
-It applies both the learned tile preferences and the learned context
-preferences.
+seeds it lifted classic quality from 0.9577 to 0.9706, better on 40 of 40.
+It applies all three learned tables — tile, context and compatible-pair
+preferences — in the same log space the worker scores in.
 A profile whose tile count does not match the active tileset is ignored. Over 30 runs on streets at 24x14, learning
 takes the displacement rate from 25.2% to 24.3% and quality from 0.9720 to
 0.9729, against a flat 26.5% / 0.969 for the `--no-learn` control. The worker

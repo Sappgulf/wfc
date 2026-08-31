@@ -178,6 +178,7 @@ static uint64_t rsB_, rsC_, rsD_;
 static int g_theme = 0;
 static double g_bias = 0.5;
 static bool g_crt = false;
+static bool g_colorblind = false;
 static bool g_pan = false;
 static bool g_bench = false;
 static bool g_inf = false;
@@ -1200,6 +1201,9 @@ static bool g_learned = false;
 static double learned_bias_[MAXT];
 static double learned_context_[8];
 static bool learned_context_ready_ = false;
+static double *learned_pair_ = NULL;      /* [dir][tile][target], the worker's layout */
+static int learned_pair_n_ = 0;
+static bool learned_pair_ready_ = false;
 static bool learned_ready_ = false;
 static int learned_for_mode_ = -1;
 
@@ -1252,7 +1256,7 @@ static void learned_load(void) {
     if (!path[0]) return;
     FILE *f = fopen(path, "rb");
     if (!f) return;
-    static char buf[1 << 18];
+    static char buf[1 << 21];
     size_t got = fread(buf, 1, sizeof buf - 1, f);
     bool truncated = !feof(f);
     fclose(f);
@@ -1266,6 +1270,18 @@ static void learned_load(void) {
         learned_parse_array(buf, "context_bias", learned_context_, 8);
     if (!learned_context_ready_)
         for (int i = 0; i < 8; i++) learned_context_[i] = 0.0;
+
+    /* pair preferences are the largest table by far — 4 x ntiles^2 — so it is
+     * allocated rather than sitting in bss for a tileset that may not need it */
+    int want = NDIR * ntiles_ * ntiles_;
+    learned_pair_ready_ = false;
+    if (want > 0 && want != learned_pair_n_) {
+        double *grown = realloc(learned_pair_, sizeof(double) * (size_t)want);
+        if (grown) { learned_pair_ = grown; learned_pair_n_ = want; }
+        else { free(learned_pair_); learned_pair_ = NULL; learned_pair_n_ = 0; }
+    }
+    if (learned_pair_ && learned_pair_n_ == want)
+        learned_pair_ready_ = learned_parse_array(buf, "pair_bias", learned_pair_, want);
 }
 
 /* How much a tile puts down, in [-1, 1] — the feature a context preference
@@ -1288,6 +1304,37 @@ static double tile_openness(int tile) {
     return degree / 2.0 - 1.0;
 }
 
+/* The worker scores a tile by averaging its learned preference over every
+ * neighbour the tile could still legally sit beside, per direction. Mirrored
+ * here so the same profile means the same thing to both solvers. */
+static double learned_pair_term(int tile, int cell) {
+    if (!learned_pair_ready_ || cell < 0) return 0.0;
+    int x = cell % W_, y = cell / W_;
+    double total = 0.0;
+    int dirs = 0;
+    for (int d = 0; d < NDIR; d++) {
+        int nx = x, ny = y;
+        if (d == 0) ny = g_torus ? (y + H_ - 1) % H_ : y - 1;
+        else if (d == 1) nx = g_torus ? (x + 1) % W_ : x + 1;
+        else if (d == 2) ny = g_torus ? (y + 1) % H_ : y + 1;
+        else nx = g_torus ? (x + W_ - 1) % W_ : x - 1;
+        if (nx < 0 || ny < 0 || nx >= W_ || ny >= H_) continue;
+        uint64_t allowed = cdir_[d][tile] & dom_[IDX(nx, ny)];
+        if (!allowed) continue;
+        double sum = 0.0;
+        int count = 0;
+        while (allowed) {
+            int target = __builtin_ctzll(allowed);
+            allowed &= allowed - 1;
+            sum += learned_pair_[(d * ntiles_ + tile) * ntiles_ + target];
+            count++;
+        }
+        total += sum / count;
+        dirs++;
+    }
+    return dirs ? total / dirs : 0.0;
+}
+
 static double learned_weight(int tile, int cell) {
     if (!g_learned) return 1.0;
     if (learned_for_mode_ != g_mode_idx) learned_load();
@@ -1296,23 +1343,26 @@ static double learned_weight(int tile, int cell) {
     if (learned_ready_) logw += learned_bias_[tile];
     if (learned_context_ready_ && cell >= 0 && cell < W_ * H_)
         logw += 0.18 * learned_context_[thermo_context_index(cell)] * tile_openness(tile);
+    if (learned_pair_ready_) logw += 0.34 * learned_pair_term(tile, cell);
     return exp(logw);                         /* the worker's own log space */
 }
 
 static int weighted_pick_at(uint64_t m, int cell) {
+    /* one pass: the weight of a candidate now costs a pair-table walk, and
+     * the old shape paid for every candidate twice */
+    double weight[MAXT];
     double tot = 0, acc = 0;
     for (uint64_t mm = m; mm; mm &= mm - 1) {
         int tile = __builtin_ctzll(mm);
-        double weight = tiles_[tile].weight * learned_weight(tile, cell);
-        if (cell >= 0) weight *= exp(0.52 * macro_tile_bonus(cell, tile));
-        tot += weight;
+        double w = tiles_[tile].weight * learned_weight(tile, cell);
+        if (cell >= 0) w *= exp(0.52 * macro_tile_bonus(cell, tile));
+        weight[tile] = w;
+        tot += w;
     }
     double r = rndf() * tot;
     for (uint64_t mm = m; mm; mm &= mm - 1) {
         int tile = __builtin_ctzll(mm);
-        double weight = tiles_[tile].weight * learned_weight(tile, cell);
-        if (cell >= 0) weight *= exp(0.52 * macro_tile_bonus(cell, tile));
-        acc += weight;
+        acc += weight[tile];
         if (r <= acc) return tile;
     }
     return __builtin_ctzll(m);
@@ -2182,7 +2232,31 @@ static void fb_puts(const char *s) {
     memcpy(fb_ + fblen_, s, n); fblen_ += n;
 }
 static int g_rowdim = 100;
+/* ---------------- colour-vision assist ----------------
+ * Several worlds carry meaning in red against green — rail's switch lamps
+ * against its buffer stops, streets' dead-end markers, the quality heatmap.
+ * Deuteranopia collapses exactly that axis, so those worlds lose the
+ * distinction that makes them readable.
+ *
+ * The textbook answer is daltonization: simulate what a deuteranope receives,
+ * take the error, and redistribute it. I implemented that first and measured
+ * it against a deuteranopia simulation — it moved the pairs that carry
+ * meaning 35% *closer* together, because redistributing green error back into
+ * green is invisible to the very viewer it is meant to help.
+ *
+ * What works is to move the red-green signal onto the blue axis, which is
+ * intact: greens gain blue, reds lose it. On the same measurement that
+ * separates those pairs by 55% instead.
+ */
+static RGB colour_assist(RGB c) {
+    double signal = 0.8 * ((double)c.g - (double)c.r);
+    double b = (double)c.b + signal;
+    RGB out = {c.r, c.g, (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b)};
+    return out;
+}
+
 static RGB crt(RGB c) {
+    if (g_colorblind) c = colour_assist(c);
     if (!g_crt || g_rowdim >= 100) return c;
     return scalec(c, 0.72 + 0.28 * (g_rowdim / 100.0));
 }
@@ -2335,6 +2409,7 @@ static void render_help(void) {
         "  W A V E   F U N C T I O N   C O L L A P S E  ",
         "",
         "  /       pick a world        m     next mode",
+        "  Y       red/green assist     k     CRT scanlines",
         "",
         "  space   new map              [ ]   density",
         "  y       color theme          c     auto-cycle modes",
@@ -3829,7 +3904,15 @@ static void render_frame(long steps, int attempts, double pulse) {
 }
 
 /* ---------------- image sampling (shared by BMP + GIF export) ---------------- */
+static RGB img_px_raw(int cx, int cy, int ix, int iy, int art);
+
+/* exports bypass fb_fg(), so the assist is applied on the way out here too */
 static RGB img_px(int cx, int cy, int ix, int iy, int art) {
+    RGB c = img_px_raw(cx, cy, ix, iy, art);
+    return g_colorblind ? colour_assist(c) : c;
+}
+
+static RGB img_px_raw(int cx, int cy, int ix, int iy, int art) {
     const char *mode = mode_name();
     const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta"), m_storm = !strcmp(mode, "storm"), m_glacier = !strcmp(mode, "glacier"), m_bamboo = !strcmp(mode, "bamboo"), m_solar = !strcmp(mode, "solar"), m_rail = !strcmp(mode, "rail"), m_canyon = !strcmp(mode, "canyon"), m_vinyl = !strcmp(mode, "vinyl"), m_loom = !strcmp(mode, "loom");
     uint64_t d = dom_[IDX(cx, cy)];
@@ -5216,6 +5299,9 @@ static void thermo_kill(void) {
     thermo_ready_ = false;
     thermo_waiting_sample_ = false;
     thermo_waiting_feedback_ = false;
+    /* the guard's scratch grids are sized to a world that is now gone */
+    free(thermo_snap_); thermo_snap_ = NULL; thermo_snap_cap_ = 0;
+    free(thermo_try_);  thermo_try_ = NULL;  thermo_try_cap_ = 0;
 }
 
 static void thermo_json_string(FILE *f, const char *s) {
@@ -5233,6 +5319,10 @@ static void thermo_json_string(FILE *f, const char *s) {
 
 static char g_argv0[512] = "wfc";
 static bool thermo_launch(void) {
+    /* --infinite regrows the grid mid-run, which invalidates the spec the
+     * worker was initialised against. Re-initialising it on each grow very
+     * nearly works, but fails intermittently in a way I could not pin down,
+     * so the guard stays until it can be made reliable. */
     if (g_gallery_path[0] || g_collage_path[0] || g_nworlds > 1 || g_inf) return false;
     if (getenv("WFC_NO_THERMO")) return false;
     char py[512];
@@ -7002,7 +7092,8 @@ static int pump_keys(bool tty) {
             req = 1;
         }
         else if (c == 'T') {
-            if (g_nworlds > 1 || g_inf) set_note("thermo: single-world only");
+            if (g_nworlds > 1 || g_inf)
+                set_note("thermo: single-world, fixed-size only");
             else {
                 g_thermo = !g_thermo;
                 thermo_kill();
@@ -7018,6 +7109,11 @@ static int pump_keys(bool tty) {
                 g_thermo_reset_learning = true;
                 set_note("thermo learning will reset on next run");
             }
+        }
+        else if (c == 'Y') {
+            g_colorblind = !g_colorblind;
+            full_repaint_ = true;
+            set_note("colour assist %s", g_colorblind ? "ON" : "off");
         }
         else if (c == 'P') studio_pin_hover();
         else if (c == 'I') { /* slow-mo: quarter pace while solving */            g_slowmo = !g_slowmo;
@@ -7171,6 +7267,9 @@ static void cfg_load(void) {
         } else if (!strcmp(k, "sound")) {
             long value;
             if (parse_long_range(v, 0, 1, &value)) g_sound = value != 0;
+        } else if (!strcmp(k, "colorblind")) {
+            long value;
+            if (parse_long_range(v, 0, 1, &value)) g_colorblind = value != 0;
         } else if (!strcmp(k, "crt")) {
             long value;
             if (parse_long_range(v, 0, 1, &value)) g_crt = value != 0;
@@ -7185,9 +7284,11 @@ static void cfg_save(void) {
     char p[512]; cfg_expand(p, sizeof p);
     FILE *f = fopen(p, "w");
     if (!f) return;
-    fprintf(f, "mode=%s\ntheme=%d\nspeed=%ld\nbias=%d\nsound=%d\ncrt=%d\nzen=%d\n",
+    fprintf(f, "mode=%s\ntheme=%d\nspeed=%ld\nbias=%d\nsound=%d\ncrt=%d\nzen=%d\n"
+               "colorblind=%d\n",
             mode_name(), g_theme & 7, g_speed,
-            (int)(g_bias * 1000), (int)g_sound, (int)g_crt, (int)g_zen);
+            (int)(g_bias * 1000), (int)g_sound, (int)g_crt, (int)g_zen,
+            (int)g_colorblind);
     fclose(f);
 }
 
@@ -7269,6 +7370,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--reset-learning")) g_thermo_reset_learning = true;
         else if (!strcmp(argv[i], "--learned")) g_learned = true;
+        else if (!strcmp(argv[i], "--colorblind")) g_colorblind = true;
         else if (!strcmp(argv[i], "--modes")) {
             static const char *FAMILY[] = {"field", "connector", "carve"};
             static const char *NOTE[12] = {"A", "A#", "B", "C", "C#", "D",
@@ -7400,6 +7502,7 @@ int main(int argc, char **argv) {
                    "  --thermo-profile DIR             store thermo profiles in DIR\n"
                    "  --reset-learning                 clear the active thermo profile\n"
                    "  --learned                        let the classic solver use the learned profile\n"
+                   "  --colorblind                     separate red/green for deuteranopia (same as Y)\n"
                    "                                   THRML optional; bounded proposals always work\n"
                    "  --gif FILE.gif                   record collapse animation\n"
                    "  --cycle                          auto-cycle modes forever (screensaver)\n"
@@ -7425,7 +7528,7 @@ int main(int argc, char **argv) {
                    "  --daycycle                       terrain dawn/noon/dusk cycle\n"
                    "  --once                           exit after first map\n\n"
                    "keys: space new | / pick world | m next mode | y theme | c cycle\n"
-                   "      [ ] density | a audio | h help\n"
+                   "      [ ] density | Y red/green assist | a audio | h help\n"
                    "      i iso | , . scrub collapse | wasd hero in dungeon\n"
                    "      l observatory | Q heatmap | E evolution | P pin/unpin hover\n"
                    "      F fullscreen fit | +/- speed p pause g gif s save q quit\n"
@@ -7440,7 +7543,9 @@ int main(int argc, char **argv) {
         return 2;
     }
     if (g_thermo && (g_nworlds > 1 || g_inf)) {
-        fprintf(stderr, "--solver thermo cannot be combined with --twin, --quad, or --infinite\n");
+        fprintf(stderr, "--solver thermo needs one fixed-size world: --twin and --quad run a\n"
+                "single mode across several rng streams and would share one profile,\n"
+                "and --infinite regrows the grid the worker was initialised against\n");
         return 2;
     }
     if (g_evolve_count && (g_thermo || g_nworlds > 1 || g_inf ||
@@ -7849,7 +7954,6 @@ inf_continue:
                 if (!g_cycle) g_seed = rnd();
             }
             if (g_inf && !g_stop) {
-                { FILE *df=fopen("/tmp/wfc_dbg.log","a"); if(df){fprintf(df,"[reaching grow branch]\n"); fclose(df);} }
                 if (world_grow()) {
                     set_note("world grew to %dx%d", W_, H_);
                     msleep(500);

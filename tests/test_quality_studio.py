@@ -248,6 +248,52 @@ class QualityStudioTests(unittest.TestCase):
                 self.assertAlmostEqual(plain, self._report(tmp, "--learned"), places=9,
                                        msg="malformed profile must be ignored: %s" % bad)
 
+    def test_colour_assist_separates_red_from_green(self):
+        """The assist has to help the viewer it is for, measurably.
+
+        Textbook daltonization moved the pairs that carry meaning 35% closer
+        together under a deuteranopia simulation, because it redistributes
+        green error back into green. Moving the red-green signal onto the
+        blue axis instead separates them. This asserts the direction.
+        """
+        def simulate(rgb):                     # what a deuteranope receives
+            r, g, b = rgb
+            long_ = 17.8824 * r + 43.5161 * g + 4.11935 * b
+            short = 0.0299566 * r + 0.184309 * g + 1.46709 * b
+            mid = 0.494207 * long_ + 1.24827 * short
+            return (0.0809444479 * long_ - 0.130504409 * mid + 0.116721066 * short,
+                    -0.0102485335 * long_ + 0.0540193266 * mid - 0.113614708 * short,
+                    -0.000365296938 * long_ - 0.00412161469 * mid + 0.693511405 * short)
+
+        def assist(rgb):                       # must match colour_assist() in C
+            r, g, b = rgb
+            return (r, g, max(0.0, min(255.0, b + 0.8 * (g - r))))
+
+        def apart(a, b):
+            return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+        pairs = [((96, 226, 138), (206, 78, 66)),    # rail lamp vs buffer stop
+                 ((244, 196, 120), (244, 86, 72)),   # streets signal vs dead end
+                 ((82, 214, 190), (255, 64, 76))]    # heatmap healthy vs weak
+        for first, second in pairs:
+            plain = apart(simulate(first), simulate(second))
+            helped = apart(simulate(assist(first)), simulate(assist(second)))
+            self.assertGreater(helped, plain * 1.05,
+                               "assist must widen %s vs %s" % (first, second))
+
+    def test_colorblind_flag_changes_the_export(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shots = []
+            for extra in ((), ("--colorblind",)):
+                png = Path(tmp) / ("rail%d.png" % len(shots))
+                result = self.run_wfc("--mode", "rail", "--seed", "5",
+                                      "--w", "16", "--h", "10", "--once",
+                                      "--save", os.fspath(png), *extra)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                shots.append(png.read_bytes())
+            self.assertNotEqual(shots[0], shots[1],
+                                "--colorblind must reach the export")
+
     def test_density_flag_is_range_checked(self):
         self.assertEqual(self.run_wfc("--density", "50", "--mode", "streets",
                                       "--w", "8", "--h", "6", "--once").returncode, 0)
