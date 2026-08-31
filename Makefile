@@ -2,22 +2,27 @@ CC ?= cc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra
 LDLIBS = -lz
 
-wfc: wfc.c
+# wfc is one translation unit: wfc.c includes these parts in order, so the
+# plain `cc -O2 -std=c11 -o wfc wfc.c -lz` in the README still works. They are
+# listed here only so editing one triggers a rebuild.
+PARTS = wfc_world.h wfc_render.h wfc_export.h wfc_audio.h wfc_thermo.h wfc_ui.h
+
+wfc: wfc.c $(PARTS)
 	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
 
 # sanitizer build: ./wfc with ASan+UBSan reporting
-wfc_asan: wfc.c
+wfc_asan: wfc.c $(PARTS)
 	$(CC) -O1 -g -std=c11 -Wall -Wextra -fsanitize=address,undefined \
 		-fno-omit-frame-pointer -o wfc_asan $< $(LDLIBS)
 
 asan: wfc_asan
 
 # pedantic warning sweep: must compile with zero output
-strict: wfc.c
+strict: wfc.c $(PARTS)
 	$(CC) -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
 		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /dev/null $< $(LDLIBS)
 
-debug: wfc.c
+debug: wfc.c $(PARTS)
 	$(CC) -O0 -g -std=c11 -Wall -Wextra -o wfc_debug $< $(LDLIBS)
 
 test: wfc

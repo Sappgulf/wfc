@@ -317,5 +317,22 @@ thing runs in about 25 seconds.
 - `make interactive-check` drives the live TUI through a pty: picker, keys,
   escape sequences, quit
 
-~6,900 lines of C, ~1,600 lines of Python. `cc -O2 -std=c11 -o wfc wfc.c -lz`
+~8,000 lines of C, ~1,600 lines of Python. `cc -O2 -std=c11 -o wfc wfc.c -lz`
 if you hate make.
+
+Still one translation unit — the C is split into parts purely so it can be
+navigated, and `wfc.c` includes them in order:
+
+| part           | what lives there                                        |
+|----------------|---------------------------------------------------------|
+| `wfc.c`        | includes, the part list, argument parsing, `main`        |
+| `wfc_world.h`  | mode registry, rng, tiles, solver, rivers, quality       |
+| `wfc_render.h` | palettes, framebuffer, every world's render, raymarcher  |
+| `wfc_export.h` | image sampling, PNG/BMP, gallery, GIF, inline graphics   |
+| `wfc_audio.h`  | the procedural synth: stingers, blips, ambient drones    |
+| `wfc_thermo.h` | sidecar protocol, counterfactual guard, learned profiles |
+| `wfc_ui.h`     | time travel, crawler, keys, picker, observatory          |
+
+The cut was made at section boundaries that were already there, in the order
+the compiler saw them: the preprocessed token stream is byte-identical to the
+single file it came from.
