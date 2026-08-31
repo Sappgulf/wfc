@@ -249,6 +249,16 @@ def validate_spec(spec):
     if not all(math.isfinite(value) and -1.0 <= value <= 1.0 for value in priors):
         raise ValueError("quality_priors must be finite values in [-1, 1]")
     spec["quality_priors"] = priors
+    openness = spec.get("tile_openness")
+    if openness is None:
+        openness = [0.0] * ntiles
+    if not isinstance(openness, list) or len(openness) != ntiles:
+        raise ValueError("tile_openness must have ntiles entries")
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in openness):
+        raise ValueError("tile_openness not numeric")
+    if any(not math.isfinite(float(v)) or not -1.0 <= float(v) <= 1.0 for v in openness):
+        raise ValueError("tile_openness must be finite values in [-1, 1]")
+    spec["tile_openness"] = [float(v) for v in openness]
     macro_name = spec.get("macro_name", "none")
     if not isinstance(macro_name, str) or len(macro_name) > 32:
         raise ValueError("macro_name must be a short string")
@@ -698,6 +708,11 @@ class ThermoSession:
         self.quality_focus = spec["quality_focus"] or "general"
         self.quality_weights = dict(spec["quality_weights"])
         self.quality_priors = list(spec["quality_priors"])
+        # How much each tile puts down, in [-1, 1]. C reads it off the tile
+        # edges and sends it: the masks the worker receives cannot distinguish
+        # a crossing from a dead end, and a feature that does not vary leaves
+        # the context bias cancelling in the softmax exactly as before.
+        self.openness = list(spec["tile_openness"])
         self.macro_name = spec["macro_name"]
         self.macro_guided_cells = spec["macro_guided_cells"]
         # The persistent path is deliberately the bounded Python proposal

@@ -217,6 +217,23 @@ class QualityStudioTests(unittest.TestCase):
             self.assertNotAlmostEqual(plain, steered, places=6,
                                       msg="a profile must reach the classic pick")
 
+    def test_context_bias_alone_changes_the_pick(self):
+        """A context preference has to be able to act, or it is dead weight.
+
+        context_bias was added identically to every tile's score at a cell, so
+        it cancelled in the softmax over that cell's options: learned,
+        persisted and transmitted, and unable to change any decision. It now
+        acts through how permissive each tile is, so it can say "here, lean
+        open" — and this asserts a profile carrying only that still bites.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = self._report(tmp)
+            (Path(tmp) / "streets-deadbeef.json").write_text(
+                json.dumps({"mode": "streets", "context_bias": [2.0] * 8}),
+                encoding="utf-8")
+            self.assertNotAlmostEqual(plain, self._report(tmp, "--learned"), places=6,
+                                      msg="context bias must reach the pick")
+
     def test_a_profile_that_does_not_fit_the_tileset_is_ignored(self):
         """Length is the guard: the fingerprint lives on the Python side."""
         with tempfile.TemporaryDirectory() as tmp:

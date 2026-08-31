@@ -1194,8 +1194,12 @@ static double quality_tile_prior(int tile) {
 static const char *json_str(const char *s, const char *key);
 static char g_thermo_profile[512];
 
+static int thermo_context_index(int cell);
+
 static bool g_learned = false;
 static double learned_bias_[MAXT];
+static double learned_context_[8];
+static bool learned_context_ready_ = false;
 static bool learned_ready_ = false;
 static int learned_for_mode_ = -1;
 
@@ -1258,27 +1262,55 @@ static void learned_load(void) {
         learned_ready_ = true;
     else
         for (int i = 0; i < MAXT; i++) learned_bias_[i] = 0.0;
+    learned_context_ready_ =
+        learned_parse_array(buf, "context_bias", learned_context_, 8);
+    if (!learned_context_ready_)
+        for (int i = 0; i < 8; i++) learned_context_[i] = 0.0;
 }
 
-static double learned_weight(int tile) {
+/* How much a tile puts down, in [-1, 1] — the feature a context preference
+ * acts through, so it can say "where the neighbourhood is unresolved, lean
+ * heavier" rather than nudging every tile at the cell by the same amount.
+ *
+ * It has to be read off the edges. My first attempt used the popcount of a
+ * tile's compatibility mask, which is nearly constant inside a binary-edge
+ * connector set — the term cancelled again and the bias stayed inert. Edge
+ * degree separates a crossing from a dead end; the band nibble separates a
+ * trough from a crest. The worker cannot derive either from the masks it is
+ * sent, so C computes this and ships it in the init frame. */
+static double tile_openness(int tile) {
+    if (tile < 0 || tile >= ntiles_ || ntiles_ <= 0) return 0.0;
+    if (mode_spec()->smooth_compat) {         /* band world: height in the ramp */
+        return (tiles_[tile].e[0] >> 4) / 3.5 - 1.0;
+    }
+    int degree = 0;
+    for (int d = 0; d < NDIR; d++) degree += tiles_[tile].e[d] != 0;
+    return degree / 2.0 - 1.0;
+}
+
+static double learned_weight(int tile, int cell) {
     if (!g_learned) return 1.0;
     if (learned_for_mode_ != g_mode_idx) learned_load();
-    if (!learned_ready_ || tile < 0 || tile >= ntiles_) return 1.0;
-    return exp(learned_bias_[tile]);          /* the worker's own log space */
+    if (tile < 0 || tile >= ntiles_) return 1.0;
+    double logw = 0.0;
+    if (learned_ready_) logw += learned_bias_[tile];
+    if (learned_context_ready_ && cell >= 0 && cell < W_ * H_)
+        logw += 0.18 * learned_context_[thermo_context_index(cell)] * tile_openness(tile);
+    return exp(logw);                         /* the worker's own log space */
 }
 
 static int weighted_pick_at(uint64_t m, int cell) {
     double tot = 0, acc = 0;
     for (uint64_t mm = m; mm; mm &= mm - 1) {
         int tile = __builtin_ctzll(mm);
-        double weight = tiles_[tile].weight * learned_weight(tile);
+        double weight = tiles_[tile].weight * learned_weight(tile, cell);
         if (cell >= 0) weight *= exp(0.52 * macro_tile_bonus(cell, tile));
         tot += weight;
     }
     double r = rndf() * tot;
     for (uint64_t mm = m; mm; mm &= mm - 1) {
         int tile = __builtin_ctzll(mm);
-        double weight = tiles_[tile].weight * learned_weight(tile);
+        double weight = tiles_[tile].weight * learned_weight(tile, cell);
         if (cell >= 0) weight *= exp(0.52 * macro_tile_bonus(cell, tile));
         acc += weight;
         if (r <= acc) return tile;
@@ -5323,6 +5355,9 @@ static bool thermo_launch(void) {
             profile.smoothness, profile.stability, profile.topology);
     for (int i = 0; i < ntiles_; i++)
         fprintf(thermo_in_, "%s%.9g", i ? "," : "", quality_tile_prior(i));
+    fputs("],\"tile_openness\":[", thermo_in_);
+    for (int i = 0; i < ntiles_; i++)
+        fprintf(thermo_in_, "%s%.9g", i ? "," : "", tile_openness(i));
     fputs("],\"macro_name\":", thermo_in_);
     thermo_json_string(thermo_in_, macro_name());
     fprintf(thermo_in_, ",\"macro_guided_cells\":%d", macro_guided_cells());

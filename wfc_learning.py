@@ -11,7 +11,7 @@ import os
 import tempfile
 
 
-PROFILE_VERSION = 1
+PROFILE_VERSION = 2
 BIAS_LIMIT = 2.5
 HISTORY_LIMIT = 64
 CONTEXT_COUNT = 8
