@@ -1,0 +1,28 @@
+{
+  "benchmark": {
+    "trials": 2,
+    "w": 8,
+    "h": 6
+  },
+  "trend": {
+    "max_p95_ratio": 1.75,
+    "max_quality_drop": 0.02
+  },
+  "solvers": {
+    "classic": {
+      "min_successes": 10,
+      "max_p95_ms": 100.0,
+      "min_median_quality": 0.88
+    },
+    "thermo-ephemeral": {
+      "min_successes": 10,
+      "max_p95_ms": 1500.0,
+      "min_median_quality": 0.90
+    },
+    "thermo-learned": {
+      "min_successes": 10,
+      "max_p95_ms": 2500.0,
+      "min_median_quality": 0.90
+    }
+  }
+}

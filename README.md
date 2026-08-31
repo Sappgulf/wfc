@@ -1,6 +1,6 @@
 # wfc — wave function collapse, animated in your terminal
 
-Procedural worlds grown live in your terminal. One file of C, one dependency (`-lz`), one `make`.
+Procedural worlds grown live in your terminal. A small C terminal app, one dependency (`-lz`), one `make`.
 
 ## Build & run
 
@@ -9,7 +9,10 @@ make
 ./wfc
 ```
 
-## The thirty-three worlds
+The mode registry is authoritative. Run `./wfc --list-modes` for the current
+37 names, or `./wfc --modes` for each name, family, musical key, and design note.
+
+## The thirty-seven worlds
 
 | mode     | design                                           |
 |----------|--------------------------------------------------|
@@ -46,6 +49,10 @@ make
 | canyon   | banded strata, a river cut, dust in the light    |
 | vinyl    | concentric grooves under a sweeping highlight    |
 | loom     | warp and weft crossing over and under on the web |
+| tide     | moon-pulled channels, foam lines, and tidal glow  |
+| marble   | veined stone, cool depth, and polished highlights  |
+| cinder   | charred strata, ember faults, and ash drift        |
+| origami  | folded paper planes catching a roaming sun         |
 
 Press `/` to open the world picker — type to filter, arrows to move, enter to
 go. It previews the highlighted world as a live thumbnail, so you choose by
@@ -65,7 +72,7 @@ raytraced heightfield view, `i` the isometric relief view of any solved world.
 `Q` quality heatmap · `E` Evolution Lab (rank seed variants) ·
 `F` fit the live terminal viewport ·
 `Y` red/green colour assist · `w a s d` hero crawl
-through solved dungeons (light all the torches) · `h` help · `q` quit
+through solved dungeons (light all the torches; `a` moves left there) · `h` help · `q` quit
 
 Mouse: left-click seed, right-click carve or unpin, drag paint, hover inspect.
 
@@ -79,7 +86,7 @@ into green. The blue shift separates them by 55% instead.
 ## Flags
 
 ```
---mode M     circuit|terrain|truchet|fire|waves|dungeon|maze|galaxy|city|aurora|matrix|pipes|mondrian|koi|lava|sakura|geode|lantern|dunes|reef|stained|streets|neurons|mycelium|delta
+--mode M     select a world; use `./wfc --list-modes` for the registry
 --w/--h N    grid cells (auto-fit by default; overridden by --fullscreen)
 --fullscreen fill the live terminal viewport and reflow on resize
 --seed N|w   numeric or word seed
@@ -89,6 +96,8 @@ into green. The blue shift separates them by 55% instead.
 --gfx/--no-gfx  iTerm2/WezTerm/kitty/ghostty pixel rendering
 --gif/--save/--zoom N  exports
 --report out.json       quality, thermo, and studio observatory report
+--world-file out.bin    W/L interactive world snapshot path (default /tmp/wfc_world.bin)
+--inspect-world FILE    validate a WFC1 snapshot and print metadata JSON
 --gallery out.html  all-mode web showcase
 --collage out.png    mosaic of all worlds
 --modes              every world with its family, musical key and design note
@@ -123,14 +132,19 @@ pins the hovered singleton (collapsing it transactionally if needed); `P` again
 or right-click reopens it only where current neighbors allow. `u` restores the
 previous domain and pin state.
 
+`W` and `L` save and restore the live studio grid as a validated WFC1 snapshot.
+Use `--inspect-world FILE` in scripts or before loading to verify its checksum
+and print the mode, dimensions, seed, density, pin count, and decided cells as
+one JSON object. Corrupt, truncated, or trailing data is rejected.
+
 `E` opens the Evolution Lab in classic single-world mode. It derives a small
 tournament of seeds from the current seed, replays current pins into every
 candidate, scores the complete quality vector, and restores the winning map.
 The equivalent headless command is `--evolve 4`; it prints ranked scores and
 leaves the winner active for `--save` or `--report`.
 
-Ten field worlds — galaxy, geode, stained, solar, storm, glacier, koi, waves,
-mondrian and matrix —
+Fourteen field worlds — galaxy, geode, stained, solar, storm, glacier, koi, waves,
+mondrian, matrix, tide, marble, cinder and origami —
 seed their domains from bilinear value noise on a coarse lattice rather than
 letting a smoothed band field random-walk. Broad forms (nebula clouds, crystal
 veins, whole panes of glass) come from that prior; detail and every hard
@@ -274,7 +288,9 @@ WFC_PYTHON=/path/to/venv/bin/python ./wfc --solver thermo
 ```
 
 If the worker itself cannot launch or returns a fatal protocol error, the
-solver notes "thermo failed" and falls back to classic automatically — the
+solver notes "thermo failed" and falls back to classic automatically. If it
+keeps producing proposals without changing the authoritative C grid, a
+progress watchdog notes "thermo stalled" and takes the same fallback. The
 project still builds with zero dependencies.
 
 ## The raymarcher
@@ -292,16 +308,25 @@ thermo-learned (isolated temporary profile) paths. It prints solve success,
 weighted quality, and milliseconds, followed by one JSON line suitable for
 automation. For a deeper local experiment, run
 `python3 tests/quality_benchmark.py --binary ./wfc --trials 2 --w 8 --h 6`.
+The final JSON includes per-solver median and p95 milliseconds plus median
+quality, so repeated runs can be compared without treating one timing sample
+as a promise.
+`make perf-check` runs the same benchmark against the checked-in
+`tests/performance_budget.json`: every case must solve, quality must stay above
+its floor, and p95 latency must stay below its SLO. To keep a local trend
+artifact and compare a later run, use `--save-current FILE` and then
+`--baseline FILE`; the gate allows a bounded latency increase and quality drop.
 
 ## Test discipline
 
-`make check` is the gate: pedantic build, all 25 modes, seed/argument/export
-regressions, the Python protocol, bridge and learner suites, the quality
-benchmark, a pty-driven pass over the live TUI, a 198-combo sanitizer sweep of every mode against every render
-toggle (`make sweep`), and a randomized ASan fuzz (`make fuzz`). The whole
-thing runs in about 25 seconds.
+`make check` is the gate: pedantic build, all 37 modes, seed/argument/export
+regressions, the Python protocol, bridge and learner suites, documentation and
+CLI contracts, the quality benchmark, a 37-mode thermo bridge sweep, pty-driven
+TUI tests, ASan pty coverage, a 222-combo sanitizer sweep of every mode against
+every render toggle (`make sweep`), and a deterministic ASan fuzz (`make fuzz`).
 
-- 33/33 modes solve first-try across seed sweeps
+- 37/37 registered modes solve at the fixed gate size; seeded/toggle variants
+  are exercised by the deterministic sweep and fuzz targets
 - AddressSanitizer + UBSan clean on solver, exports, all interactive paths
   (`make asan`, then `./wfc_asan --mode <m> --once --save out.png`; pty via
   `script -q /dev/null ./wfc_asan ...` for the interactive paths)
@@ -313,18 +338,27 @@ thing runs in about 25 seconds.
 - Headless exports are reproducible: the render clock freezes at a
   seed-derived phase, so the same seed always saves the same image
 - `make quality-benchmark` compares quality-directed solver paths
+- `make perf-check` enforces the benchmark quality/latency SLO budget
+- `python3 tests/performance_gate.py --baseline previous.json --save-current current.json`
+  reports relative p95/quality regressions for a local trend
 - `make sweep` runs every mode against every render toggle under ASan+UBSan
 - `make interactive-check` drives the live TUI through a pty: picker, keys,
-  escape sequences, quit
+  escape sequences, help, quit
+- `make interactive-asan-check` repeats those pty paths under ASan
+- `make thermo-check` drives the sidecar protocol across every registry mode
+- `make fuzz` replays the same 50 ASan cases from its printed seed
 
-~8,000 lines of C, ~1,600 lines of Python. `cc -O2 -std=c11 -o wfc wfc.c -lz`
+~8,000 lines of C, ~1,600 lines of Python. `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz`
 if you hate make.
 
-Still one translation unit — the C is split into parts purely so it can be
-navigated, and `wfc.c` includes them in order:
+The main program remains one translation unit — the C is split into parts
+purely so it can be navigated, and `wfc.c` includes them in order. The small
+`wfc_core` module is separately compiled so domain invariants have a narrow,
+dependency-free test seam:
 
 | part           | what lives there                                        |
 |----------------|---------------------------------------------------------|
+| `wfc_core.c/.h`| checked domain masks and shared solver invariants        |
 | `wfc.c`        | includes, the part list, argument parsing, `main`        |
 | `wfc_world.h`  | mode registry, rng, tiles, solver, rivers, quality       |
 | `wfc_render.h` | palettes, framebuffer, every world's render, raymarcher  |
@@ -333,6 +367,5 @@ navigated, and `wfc.c` includes them in order:
 | `wfc_thermo.h` | sidecar protocol, counterfactual guard, learned profiles |
 | `wfc_ui.h`     | time travel, crawler, keys, picker, observatory          |
 
-The cut was made at section boundaries that were already there, in the order
-the compiler saw them: the preprocessed token stream is byte-identical to the
-single file it came from.
+The header parts are still included in their compiler order; `wfc_core.c` is
+the only independent compilation unit and has no application dependencies.

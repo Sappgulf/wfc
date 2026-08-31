@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdint.h>
+#include <unistd.h>
 
 #define main wfc_program_main
 int wfc_program_main(int argc, char **argv);
@@ -22,6 +23,13 @@ int main(void) {
     term_fit_for(202, 58);
     assert(W_ == 50 && H_ == 28);
     g_fullscreen = false;
+
+    W_ = 8;
+    g_pan = true;
+    g_vx = 7;
+    pan_camera_tick();
+    assert(g_vx == 0);
+    g_pan = false;
 
     W_ = 8;
     H_ = 6;
@@ -57,6 +65,44 @@ int main(void) {
     assert(studio_pin_[cell] == 0);
     assert(studio_pin_count_ == 0);
     assert(dom_[cell] == original);
+
+    char save_path[] = "/tmp/wfc-save-test-XXXXXX";
+    int save_fd = mkstemp(save_path);
+    assert(save_fd >= 0);
+    close(save_fd);
+    unlink(save_path);
+    uint64_t saved_domain = dom_[0];
+    assert(world_save_file(save_path));
+    dom_[0] = 1;
+    assert(world_load_file(save_path));
+    assert(dom_[0] == saved_domain);
+    FILE *bad_save = fopen(save_path, "wb");
+    assert(bad_save);
+    assert(fputs("not a wfc save", bad_save) >= 0);
+    assert(fclose(bad_save) == 0);
+    assert(!world_load_file(save_path));
+    unlink(save_path);
+
+    setup_mode(find_mode("dungeon"));
+    W_ = 4;
+    H_ = 4;
+    grid_alloc(W_, H_);
+    grid_reset();
+    int hero_tile = -1, left_tile = -1;
+    for (int t = 0; t < ntiles_; t++) {
+        if (tiles_[t].e[3] == 2 && hero_tile < 0) hero_tile = t;
+        if (tiles_[t].e[1] == 2 && left_tile < 0) left_tile = t;
+    }
+    assert(hero_tile >= 0 && left_tile >= 0);
+    dom_[IDX(2, 2)] = (uint64_t)1 << hero_tile;
+    dom_[IDX(1, 2)] = (uint64_t)1 << left_tile;
+    g_hx = 2;
+    g_hy = 2;
+    g_hero_on = true;
+    g_sound = false;
+    assert(dispatch_hero_key('a'));
+    assert(g_hx == 1 && g_hy == 2);
+    assert(!g_sound);
 
     click_bufs_invalidate();
     free_world_buffers();

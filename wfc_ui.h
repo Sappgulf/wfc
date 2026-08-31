@@ -4,7 +4,7 @@
  * the world picker, the observatory and the evolution lab
  *
  * wfc is deliberately one translation unit: wfc.c includes these parts in
- * order, so `cc -O2 -std=c11 -o wfc wfc.c -lz` still builds the whole thing
+ * order, so `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz` still builds the whole thing
  * with no build system. They are cut at the section boundaries that were
  * already there, in the order the compiler saw them, so the token stream is
  * unchanged -- these are not independent modules and have no include guards
@@ -121,6 +121,280 @@ static void hero_move(char k) {
                 set_note("torch lit \xe2\x80\x94 %d/%d", g_loot, g_loot_tot);
         }
     }
+}
+
+static bool dispatch_hero_key(int c) {
+    if (!g_hero_on || strcmp(mode_name(), "dungeon")) return false;
+    if (c != 'w' && c != 'a' && c != 's' && c != 'd') return false;
+    hero_move((char)c);
+    return true;
+}
+
+/* ---------------- world snapshots ----------------
+ * W/L stores the semantic grid state with an explicit format. Raw C
+ * structs and host-endian integers made the old file silently unsafe to load
+ * after truncation or on another architecture. */
+#define WORLD_SAVE_MAGIC UINT32_C(0x31434657) /* bytes: WFC1 */
+#define WORLD_SAVE_VERSION UINT32_C(1)
+#define WORLD_SAVE_MAX_CELLS ((size_t)1000000)
+#define WORLD_HASH_OFFSET UINT64_C(1469598103934665603)
+
+static uint64_t world_hash_bytes(uint64_t hash, const unsigned char *bytes,
+                                 size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        hash ^= bytes[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static bool world_write_bytes(FILE *f, const unsigned char *bytes, size_t count,
+                              uint64_t *hash) {
+    if (fwrite(bytes, 1, count, f) != count) return false;
+    if (hash) *hash = world_hash_bytes(*hash, bytes, count);
+    return true;
+}
+
+static bool world_read_bytes(FILE *f, unsigned char *bytes, size_t count,
+                             uint64_t *hash) {
+    if (fread(bytes, 1, count, f) != count) return false;
+    if (hash) *hash = world_hash_bytes(*hash, bytes, count);
+    return true;
+}
+
+static bool world_put_u32(FILE *f, uint32_t value, uint64_t *hash) {
+    unsigned char bytes[4] = {(unsigned char)value, (unsigned char)(value >> 8),
+                              (unsigned char)(value >> 16), (unsigned char)(value >> 24)};
+    return world_write_bytes(f, bytes, sizeof bytes, hash);
+}
+
+static bool world_put_u64(FILE *f, uint64_t value, uint64_t *hash) {
+    unsigned char bytes[8];
+    for (int i = 0; i < 8; i++) bytes[i] = (unsigned char)(value >> (8 * i));
+    return world_write_bytes(f, bytes, sizeof bytes, hash);
+}
+
+static bool world_get_u32(FILE *f, uint32_t *value, uint64_t *hash) {
+    unsigned char bytes[4];
+    if (!world_read_bytes(f, bytes, sizeof bytes, hash)) return false;
+    *value = (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+             ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+    return true;
+}
+
+static bool world_get_u64(FILE *f, uint64_t *value, uint64_t *hash) {
+    unsigned char bytes[8];
+    if (!world_read_bytes(f, bytes, sizeof bytes, hash)) return false;
+    *value = 0;
+    for (int i = 0; i < 8; i++) *value |= (uint64_t)bytes[i] << (8 * i);
+    return true;
+}
+
+static bool world_save_dims(uint32_t w, uint32_t h, size_t *cells_out) {
+    if (w == 0 || h == 0 || w > 1000 || h > 1000) return false;
+    uint64_t cells = (uint64_t)w * h;
+    if (cells > WORLD_SAVE_MAX_CELLS) return false;
+    if (cells_out) *cells_out = (size_t)cells;
+    return true;
+}
+
+typedef struct {
+    uint32_t mode, w, h, ntiles, bias_milli, pin_count;
+    uint64_t seed;
+    size_t cells;
+    uint64_t *domains;
+    uint8_t *pins, *pin_tiles;
+} WorldSnapshot;
+
+static void world_snapshot_free(WorldSnapshot *snapshot) {
+    if (!snapshot) return;
+    free(snapshot->domains);
+    free(snapshot->pins);
+    free(snapshot->pin_tiles);
+    memset(snapshot, 0, sizeof *snapshot);
+}
+
+static bool world_save_file(const char *path) {
+    if (!path || !*path || strlen(path) >= sizeof g_world_path ||
+        W_ <= 0 || H_ <= 0 || ntiles_ <= 0 || ntiles_ > MAXT || !dom_ ||
+        !studio_pin_ || !studio_tile_) return false;
+    size_t cells;
+    if (!world_save_dims((uint32_t)W_, (uint32_t)H_, &cells) ||
+        !wfc_core_domains_valid(dom_, cells, (unsigned)ntiles_)) return false;
+
+    uint32_t pin_count = 0;
+    for (size_t i = 0; i < cells; i++) {
+        if (!studio_pin_[i]) continue;
+        if (pin_count == UINT32_MAX || !wfc_core_domain_valid(dom_[i], (unsigned)ntiles_) ||
+            pc64(dom_[i]) != 1 || studio_tile_[i] >= (uint8_t)ntiles_ ||
+            (uint32_t)__builtin_ctzll(dom_[i]) != studio_tile_[i]) return false;
+        pin_count++;
+    }
+
+    char temp[sizeof g_world_path + 32];
+    int temp_len = snprintf(temp, sizeof temp, "%s.tmp.%ld", path, (long)getpid());
+    if (temp_len < 0 || (size_t)temp_len >= sizeof temp) return false;
+    FILE *f = fopen(temp, "wb");
+    if (!f) return false;
+
+    uint64_t hash = WORLD_HASH_OFFSET;
+    bool ok = world_put_u32(f, WORLD_SAVE_MAGIC, NULL) &&
+              world_put_u32(f, WORLD_SAVE_VERSION, NULL) &&
+              world_put_u32(f, (uint32_t)g_mode_idx, &hash) &&
+              world_put_u32(f, (uint32_t)W_, &hash) &&
+              world_put_u32(f, (uint32_t)H_, &hash) &&
+              world_put_u32(f, (uint32_t)ntiles_, &hash) &&
+              world_put_u64(f, g_seed, &hash) &&
+              world_put_u32(f, (uint32_t)(g_bias * 1000.0 + 0.5), &hash) &&
+              world_put_u32(f, (uint32_t)cells, &hash);
+    for (size_t i = 0; ok && i < cells; i++) ok = world_put_u64(f, dom_[i], &hash);
+    if (ok) ok = world_put_u32(f, pin_count, &hash);
+    for (size_t i = 0; ok && i < cells; i++) {
+        if (!studio_pin_[i]) continue;
+        ok = world_put_u32(f, (uint32_t)i, &hash) &&
+             world_put_u32(f, studio_tile_[i], &hash);
+    }
+    if (ok) ok = world_put_u64(f, hash, NULL);
+    if (ok && fflush(f) != 0) ok = false;
+    if (fclose(f) != 0) ok = false;
+    if (!ok || rename(temp, path) != 0) {
+        unlink(temp);
+        return false;
+    }
+    return true;
+}
+
+static bool world_snapshot_read(const char *path, WorldSnapshot *snapshot) {
+    if (!snapshot || !path || !*path || strlen(path) >= sizeof g_world_path) return false;
+    *snapshot = (WorldSnapshot){0};
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    uint64_t *domains = NULL;
+    uint8_t *pins = NULL, *pin_tiles = NULL;
+    uint32_t magic = 0, version = 0, mode = 0, w = 0, h = 0;
+    uint32_t saved_ntiles = 0, bias_milli = 0, saved_cells = 0, pin_count = 0;
+    uint64_t seed = 0, stored_hash = 0;
+    size_t cells = 0;
+    uint64_t hash = WORLD_HASH_OFFSET;
+    bool ok = world_get_u32(f, &magic, NULL) &&
+              world_get_u32(f, &version, NULL) &&
+              magic == WORLD_SAVE_MAGIC && version == WORLD_SAVE_VERSION &&
+              world_get_u32(f, &mode, &hash) &&
+              world_get_u32(f, &w, &hash) && world_get_u32(f, &h, &hash) &&
+              world_get_u32(f, &saved_ntiles, &hash) &&
+              world_get_u64(f, &seed, &hash) &&
+              world_get_u32(f, &bias_milli, &hash) &&
+              world_get_u32(f, &saved_cells, &hash) &&
+              mode < (uint32_t)NMODES && saved_ntiles > 0 && saved_ntiles <= MAXT &&
+              bias_milli >= 40 && bias_milli <= 960 &&
+              world_save_dims(w, h, &cells) && saved_cells == (uint32_t)cells;
+    if (!ok) goto world_load_fail;
+
+    domains = malloc(sizeof *domains * cells);
+    pins = calloc(cells, 1);
+    pin_tiles = calloc(cells, 1);
+    if (!domains || !pins || !pin_tiles) goto world_load_fail;
+    for (size_t i = 0; i < cells; i++)
+        if (!world_get_u64(f, &domains[i], &hash)) goto world_load_fail;
+    if (!wfc_core_domains_valid(domains, cells, saved_ntiles) ||
+        !world_get_u32(f, &pin_count, &hash) || pin_count > (uint32_t)cells)
+        goto world_load_fail;
+    for (uint32_t i = 0; i < pin_count; i++) {
+        uint32_t cell = 0, tile = 0;
+        if (!world_get_u32(f, &cell, &hash) || !world_get_u32(f, &tile, &hash) ||
+            cell >= (uint32_t)cells || tile >= saved_ntiles || pins[cell] ||
+            pc64(domains[cell]) != 1 ||
+            (uint32_t)__builtin_ctzll(domains[cell]) != tile) goto world_load_fail;
+        pins[cell] = 1;
+        pin_tiles[cell] = (uint8_t)tile;
+    }
+    if (!world_get_u64(f, &stored_hash, NULL) || stored_hash != hash ||
+        fgetc(f) != EOF || ferror(f)) goto world_load_fail;
+    bool close_ok = fclose(f) == 0;
+    f = NULL;
+    if (!close_ok) goto world_load_fail;
+
+    snapshot->mode = mode;
+    snapshot->w = w;
+    snapshot->h = h;
+    snapshot->ntiles = saved_ntiles;
+    snapshot->bias_milli = bias_milli;
+    snapshot->pin_count = pin_count;
+    snapshot->seed = seed;
+    snapshot->cells = cells;
+    snapshot->domains = domains;
+    snapshot->pins = pins;
+    snapshot->pin_tiles = pin_tiles;
+    return true;
+
+world_load_fail:
+    if (f) fclose(f);
+    free(domains); free(pins); free(pin_tiles);
+    return false;
+}
+
+static bool world_inspect_file(const char *path) {
+    WorldSnapshot snapshot = {0};
+    if (!world_snapshot_read(path, &snapshot)) {
+        fprintf(stderr, "invalid world snapshot: %s\n", path ? path : "(null)");
+        return false;
+    }
+    size_t decided = wfc_core_count_singletons(snapshot.domains, snapshot.cells);
+    printf("{\"format\":\"WFC1\",\"version\":%u,\"mode\":\"%s\","
+           "\"dimensions\":{\"w\":%u,\"h\":%u},\"tiles\":%u,"
+           "\"seed\":%llu,\"bias\":%.3f,\"pins\":%u,\"decided\":%zu}\n",
+           WORLD_SAVE_VERSION, MODESPEC[snapshot.mode].name,
+           snapshot.w, snapshot.h, snapshot.ntiles,
+           (unsigned long long)snapshot.seed, snapshot.bias_milli / 1000.0,
+           snapshot.pin_count, decided);
+    world_snapshot_free(&snapshot);
+    return true;
+}
+
+static bool world_load_file(const char *path) {
+    WorldSnapshot snapshot = {0};
+    if (!world_snapshot_read(path, &snapshot)) return false;
+
+    int old_mode = g_mode_idx;
+    uint64_t old_seed = g_seed;
+    bool old_seed_set = g_seed_set;
+    double old_bias = g_bias;
+    g_seed = snapshot.seed;
+    g_seed_set = true;
+    setup_mode((int)snapshot.mode);
+    if ((uint32_t)ntiles_ != snapshot.ntiles) {
+        g_seed = old_seed;
+        g_seed_set = old_seed_set;
+        g_bias = old_bias;
+        setup_mode(old_mode);
+        world_snapshot_free(&snapshot);
+        return false;
+    }
+    if (g_thermo) thermo_kill();
+    hist_clear();
+    W_ = (int)snapshot.w;
+    H_ = (int)snapshot.h;
+    g_user_w = W_;
+    g_user_h = H_;
+    grid_alloc(W_, H_);
+    memcpy(dom_, snapshot.domains, sizeof *snapshot.domains * snapshot.cells);
+    memcpy(studio_pin_, snapshot.pins, snapshot.cells);
+    memcpy(studio_tile_, snapshot.pin_tiles, snapshot.cells);
+    studio_pin_count_ = (int)snapshot.pin_count;
+    g_bias = snapshot.bias_milli / 1000.0;
+    apply_bias();
+    macro_build();
+    g_comp_ready = false;
+    n_river_ = 0;
+    g_river_show = 0;
+    memset(river_, 0, snapshot.cells);
+    for (size_t i = 0; i < snapshot.cells; i++) river_rank_[i] = -1;
+    g_decided = (int)wfc_core_count_singletons(dom_, snapshot.cells);
+    g_vx = g_vy = 0;
+    full_repaint_ = true;
+    quality_record(quality_measure(false));
+    world_snapshot_free(&snapshot);
+    return true;
 }
 
 /* fast-forward the solve until the world is whole, with post-passes */
@@ -643,7 +917,7 @@ static int pump_keys(bool tty) {
             continue;
         }
         if (c == '/' || c == 'M') {
-            /* thirty-three worlds is too many to reach by pressing `m` */
+            /* the picker is easier than reaching every world with `m` */
             g_picker_was_paused = g_paused;
             g_paused = true;
             g_picker = true;
@@ -689,6 +963,7 @@ static int pump_keys(bool tty) {
             BIOMES = BIOMES_SEASONAL[(g_theme & 7) >= 4 ? (g_theme & 7) - 4 : 0];
             set_note("theme %d", (g_theme & 7) + 1);
         }
+        else if (dispatch_hero_key(c)) { }
         else if (c == 'a') {
             g_sound = !g_sound;
             set_note("audio %s", g_sound ? "ON" : "off");
@@ -721,90 +996,15 @@ static int pump_keys(bool tty) {
             else if (hist_fwd()) set_note("back to the future");
             else if (g_paused) { g_paused = false; hist_pos_ = -1; set_note("live collapse"); }
         }
-        else if (c == 'w' || c == 'a' || c == 's' || c == 'd') {
-            if (g_hero_on && !strcmp(mode_name(), "dungeon")) hero_move(c);
-        }
+        else if (c == 'w' || c == 's' || c == 'd') { }
         else if (c == 'k') { g_crt = !g_crt; set_note("CRT %s", g_crt ? "on" : "off"); }
         else if (c == 'W') {
-            FILE *f = fopen("/tmp/wfc_world.bin", "wb");
-            if (!f) { set_note("save failed"); }
-            else {
-                uint32_t hdr[5] = {(uint32_t)g_mode_idx, (uint32_t)W_, (uint32_t)H_,
-                                   (uint32_t)(g_seed & 0xffffffff), (uint32_t)(g_bias * 1000)};
-                bool ok = fwrite(hdr, 4, 5, f) == 5 &&
-                          fwrite(dom_, sizeof(uint64_t), (size_t)W_ * H_, f) == (size_t)W_ * H_;
-                uint32_t pin_count = (uint32_t)studio_pin_count_;
-                if (ok) ok = fwrite(&pin_count, sizeof pin_count, 1, f) == 1;
-                for (int i2 = 0; ok && i2 < W_ * H_; i2++) {
-                    if (!studio_pin_[i2]) continue;
-                    uint32_t record[2] = {(uint32_t)i2, studio_tile_[i2]};
-                    ok = fwrite(record, sizeof record, 1, f) == 1;
-                }
-                if (fclose(f) != 0) ok = false;
-                set_note(ok ? "world saved (/tmp/wfc_world.bin)" : "save failed (disk?)");
-            }
+            set_note(world_save_file(g_world_path) ? "world saved (%s)" : "save failed (%s)",
+                     g_world_path);
         }
         else if (c == 'L') {
-            FILE *f = fopen("/tmp/wfc_world.bin", "rb");
-            if (!f) { set_note("no saved world"); }
-            else {
-                uint32_t hdr[5];
-                if (fread(hdr, 4, 5, f) == 5 && hdr[0] < NMODES &&
-                    hdr[1] == (uint32_t)W_ && hdr[2] == (uint32_t)H_) {
-                    setup_mode((int)hdr[0]);
-                    g_bias = hdr[4] / 1000.0;
-                    apply_bias();
-                    if (fread(dom_, sizeof(uint64_t), (size_t)W_ * H_, f) != (size_t)W_ * H_) {
-                        set_note("truncated save");
-                    } else {
-                        memset(studio_pin_, 0, (size_t)W_ * H_);
-                        memset(studio_tile_, 0, (size_t)W_ * H_);
-                        studio_pin_count_ = 0;
-                        uint32_t pin_count = 0;
-                        bool pin_ok = true;
-                        size_t pin_header = fread(&pin_count, sizeof pin_count, 1, f);
-                        if (pin_header == 1) {
-                            uint32_t records = pin_count;
-                            if (records > (uint32_t)(W_ * H_)) {
-                                pin_ok = false;
-                                records = 0;
-                            }
-                            for (uint32_t p2 = 0; p2 < records; p2++) {
-                                uint32_t record[2];
-                                if (fread(record, sizeof record, 1, f) != 1) { pin_ok = false; break; }
-                                if (record[0] >= (uint32_t)(W_ * H_) || record[1] >= (uint32_t)ntiles_ ||
-                                    pc64(dom_[record[0]]) != 1 ||
-                                    (uint32_t)__builtin_ctzll(dom_[record[0]]) != record[1] ||
-                                    studio_pin_[record[0]]) {
-                                    pin_ok = false;
-                                    continue;
-                                }
-                                studio_pin_[record[0]] = 1;
-                                studio_tile_[record[0]] = (uint8_t)record[1];
-                                studio_pin_count_++;
-                            }
-                        } else if (ferror(f)) pin_ok = false;
-                        if (!pin_ok) {
-                            memset(studio_pin_, 0, (size_t)W_ * H_);
-                            memset(studio_tile_, 0, (size_t)W_ * H_);
-                            studio_pin_count_ = 0;
-                        }
-                        hist_clear(); /* scrub history predates this load */
-                        g_comp_ready = false;
-                        n_river_ = 0; g_river_show = 0;
-                        memset(river_, 0, (size_t)W_ * H_);
-                        g_decided = 0;
-                        for (int i2 = 0; i2 < W_ * H_; i2++) {
-                            river_rank_[i2] = -1;
-                            if (pc64(dom_[i2]) == 1) g_decided++;
-                        }
-                        quality_record(quality_measure(false));
-                        set_note(pin_ok ? "world loaded (%d pins)" : "world loaded; pin metadata ignored",
-                                 studio_pin_count_);
-                    }
-                } else set_note("incompatible save");
-                fclose(f);
-            }
+            if (world_load_file(g_world_path)) set_note("world loaded (%d pins)", studio_pin_count_);
+            else set_note("load failed or incompatible save");
         }
         else if (c == 'u') {
             if (undo_pop()) set_note("undid sculpt");

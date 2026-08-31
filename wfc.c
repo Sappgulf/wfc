@@ -1,23 +1,13 @@
 /* wfc.c — Wave Function Collapse, animated live in your terminal.
  *
  * Watch a grid of superposed cells collapse into:
- *   circuit : glowing toroidal circuit boards (braille-dot pixel art)
- *   terrain : smooth elevation islands - beaches, forests, snowy peaks
- *   truchet : two-color woven loops (color-matched truchet arcs)
- *   pipes   : water-carrying pressure networks with flowing pulses
- *   mondrian: painted plazas split by charcoal rules
- *   koi     : a pond where koi drift between lily pads
- *   lava    : crusting basalt over a breathing molten field
- *   streets : procedural city streets with signals and crossings
- *   neurons : branching dendrites with live action potentials
- *   mycelium: organic root networks and drifting spores
- *   delta   : branching river mouths, estuaries, and tidal glints
+ *   37 registry worlds: run `./wfc --list-modes` for the authoritative names
  *
  * Views: r raymarched heightfield, i isometric relief, z all-worlds sheet.
  * Extras: gif/png export, terminal pixel rendering (iTerm/kitty/WezTerm),
  * WASD crawler in solved dungeons, and ',' '.' collapse time-scrubbing.
  *
- * build:  cc -O2 -std=c11 -Wall -Wextra -o wfc wfc.c -lz
+ * build:  cc -O2 -std=c11 -Wall -Wextra -o wfc wfc.c wfc_core.c -lz
  * run:    ./wfc
  * keys:   space new map | m mode | +/- speed | p pause | s save PNG | q quit
  *
@@ -45,6 +35,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <zlib.h>
+
+#include "wfc_core.h"
 
 #define MAXT 64
 #define MAXW 4
@@ -118,6 +110,10 @@ static bool parse_seed_value(const char *text, uint64_t *out) {
     return true;
 }
 
+static void pan_camera_tick(void) {
+    if (g_pan && W_ > 0) g_vx = (g_vx + 1) % W_;
+}
+
 static int find_mode(const char *name) {
     if (!name) return -1;
     for (int i = 0; i < NMODES; i++)
@@ -186,6 +182,7 @@ int main(int argc, char **argv) {
         snprintf(g_argv0, sizeof g_argv0, "%s", a0);
     }
     cfg_load();
+    char inspect_path[512] = {0};
 #define NEXTV() (++i < argc ? argv[i] : (fprintf(stderr, "missing value for %s\n", argv[i - 1]), exit(2), (char *)NULL))
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--mode")) {
@@ -368,6 +365,22 @@ int main(int argc, char **argv) {
             }
             snprintf(g_report_path, sizeof g_report_path, "%s", report);
         }
+        else if (!strcmp(argv[i], "--world-file")) {
+            const char *world = NEXTV();
+            if (!*world || strlen(world) >= sizeof g_world_path) {
+                fprintf(stderr, "invalid value for --world-file\n");
+                return 2;
+            }
+            snprintf(g_world_path, sizeof g_world_path, "%s", world);
+        }
+        else if (!strcmp(argv[i], "--inspect-world")) {
+            const char *world = NEXTV();
+            if (!*world || strlen(world) >= sizeof inspect_path) {
+                fprintf(stderr, "invalid value for --inspect-world\n");
+                return 2;
+            }
+            snprintf(inspect_path, sizeof inspect_path, "%s", world);
+        }
         else if (!strcmp(argv[i], "--gif")) { snprintf(g_gif_path, sizeof g_gif_path, "%s", NEXTV()); g_gif_on = 1; }
         else if (!strcmp(argv[i], "--version")) { printf("wfc 5.3 \u2014 quality evolution studio\n"); return 0; }
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -385,6 +398,8 @@ int main(int argc, char **argv) {
                    "  --speed N                        collapse steps/sec (default 1600)\n"
                    "  --save FILE.png|.bmp             auto-save map on completion\n"
                    "  --report FILE.json               quality + thermo + studio report\n"
+                   "  --world-file FILE                W/L interactive world snapshot path\n"
+                   "  --inspect-world FILE             validate and print WFC1 metadata as JSON\n"
                    "  --solver classic|thermo          collapse engine (thermo = adaptive sidecar)\n"
                    "  --no-learn                       disable persistent thermo preferences\n"
                    "  --thermo-profile DIR             store thermo profiles in DIR\n"
@@ -420,7 +435,7 @@ int main(int argc, char **argv) {
                    "      i iso | , . scrub collapse | wasd hero in dungeon\n"
                    "      l observatory | Q heatmap | E evolution | P pin/unpin hover\n"
                    "      F fullscreen fit | +/- speed p pause g gif s save q quit\n"
-                   "build: cc -O2 -std=c11 -o wfc wfc.c -lz\n");
+                   "build: cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz\n");
             return 0;
         }
         else { fprintf(stderr, "unknown arg %s (try --help)\n", argv[i]); return 2; }
@@ -441,6 +456,7 @@ int main(int argc, char **argv) {
         return 2;
     }
 
+    if (inspect_path[0]) return world_inspect_file(inspect_path) ? 0 : 1;
     if (g_gallery_path[0]) return run_gallery(g_gallery_path) ? 0 : 1;
     if (g_collage_path[0]) {
         int pw = 24, ph = 14;
@@ -576,7 +592,7 @@ int main(int argc, char **argv) {
         if (getenv("WFC_DEBUG")) {
             fprintf(stderr, "ntiles=%d dom[0]=%llx pc=%d full=%llx\n",
                     ntiles_, (unsigned long long)dom_[0], pc64(dom_[0]),
-                    (unsigned long long)(((uint64_t)1 << ntiles_) - 1));
+                    (unsigned long long)wfc_core_full_mask((unsigned)ntiles_));
         }
         char gp[512];
         if (g_nworlds == 1) {
@@ -814,11 +830,7 @@ inf_continue:
                 else set_note("report failed: %s", g_report_path);
             }
             double t0 = now_ms();
-            bool anim = !strcmp(mode_name(), "storm") || !strcmp(mode_name(), "solar")
-                        || !strcmp(mode_name(), "vinyl")
-                        || !strcmp(mode_name(), "bamboo")
-                        || !strcmp(mode_name(), "fire") || !strcmp(mode_name(), "waves")
-                        || !strcmp(mode_name(), "galaxy") || !strcmp(mode_name(), "city") || !strcmp(mode_name(), "aurora");
+            bool anim = (mode_spec()->flags & MF_LINGER_ANIM) != 0;
             double linger = anim ? 4500 : 1800;
             bool cut_short = false;
             while (!g_stop && now_ms() - t0 < linger) {
@@ -831,8 +843,7 @@ inf_continue:
                 if (lreq == 2) { g_stop = 1; break; }
                 if (lreq == 1) { cut_short = true; break; }
                 if (g_paused) { msleep(30); continue; }
-                if (g_pan) { g_vx = (g_vx + 1) % W_; }
-                if (g_pan) { g_vx = (g_vx + 1) % W_; }
+                pan_camera_tick();
                 if (g_gfx) {
                     static int skip = 0;
                     if (++skip % 3 == 0) emit_frame_img();

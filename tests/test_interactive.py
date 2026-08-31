@@ -23,7 +23,7 @@ import sandbox  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "wfc"
+BINARY = Path(os.environ.get("WFC_BINARY", ROOT / "wfc"))
 ESC = b"\x1b"
 
 
@@ -146,8 +146,32 @@ class InteractiveTests(unittest.TestCase):
         typed = self.session.send_until(b"rail", lambda o: "search: rail" in plain(o))
         text = plain(typed)
         self.assertIn("search: rail", text)
-        self.assertIn("1/33 worlds", text)
+        self.assertIn("1/37 worlds", text)
         self.assertEqual(preview_label(typed), "rail")
+
+    def test_picker_filters_by_mode_tag(self):
+        self.session = Session()
+        self.session.send_until(b"/", lambda o: "PICK A WORLD" in plain(o))
+        filtered = self.session.send_until(
+            b"#network", lambda o: "search: #network" in plain(o) and "rail" in plain(o),
+        )
+        text = last_screen(filtered)
+        self.assertIn("streets", text)
+        self.assertIn("rail", text)
+        self.assertNotIn("tide", text)
+        self.assertIn("#field", text)
+        self.assertIn("#animated", text)
+
+    def test_help_explains_the_first_three_interactions(self):
+        self.session = Session()
+        opened = self.session.send_until(
+            b"h", lambda o: "QUICK START" in plain(o), timeout=8,
+        )
+        text = plain(opened)
+        self.assertIn("QUICK START", text)
+        self.assertIn("1  pick a world", text)
+        self.assertIn("2  wait for collapse", text)
+        self.assertIn("press any key", text.lower())
 
     def test_picker_selects_on_enter_and_cancels_on_escape(self):
         self.session = Session()

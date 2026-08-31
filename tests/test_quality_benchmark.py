@@ -13,21 +13,31 @@ SCRIPT = ROOT / "tests" / "quality_benchmark.py"
 
 class QualityBenchmarkTests(unittest.TestCase):
     def test_benchmark_covers_solver_paths_and_network_modes(self):
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--binary", str(ROOT / "wfc"),
-             "--trials", "1", "--w", "8", "--h", "6"],
-            cwd=ROOT, capture_output=True, text=True, timeout=30,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("QUALITY BENCHMARK", result.stdout)
-        payload = json.loads(result.stdout.splitlines()[-1])
-        self.assertEqual(payload["schema"], 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = Path(tmp) / "benchmark.json"
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--binary", str(ROOT / "wfc"),
+                 "--trials", "1", "--w", "8", "--h", "6", "--json-out",
+                 str(artifact)], cwd=ROOT, capture_output=True, text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(artifact.exists())
+            self.assertIn("QUALITY BENCHMARK", result.stdout)
+            payload = json.loads(artifact.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema"], 2)
         self.assertEqual(set(payload["solvers"]), {
             "classic", "thermo-ephemeral", "thermo-learned",
         })
         self.assertEqual({item["mode"] for item in payload["results"]},
                          {"streets", "neurons", "mycelium", "delta", "rail"})
         self.assertTrue(all(item["success"] for item in payload["results"]))
+        self.assertEqual(set(payload["summary"]), {
+            "classic", "thermo-ephemeral", "thermo-learned",
+        })
+        for solver in payload["summary"]:
+            self.assertIn("median_ms", payload["summary"][solver])
+            self.assertIn("p95_ms", payload["summary"][solver])
 
     def test_profile_isolation_for_non_classic_solvers(self):
         run_calls = []

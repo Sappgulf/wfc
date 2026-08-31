@@ -4,7 +4,7 @@
  * the web gallery, animated GIF, and inline-image graphics
  *
  * wfc is deliberately one translation unit: wfc.c includes these parts in
- * order, so `cc -O2 -std=c11 -o wfc wfc.c -lz` still builds the whole thing
+ * order, so `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz` still builds the whole thing
  * with no build system. They are cut at the section boundaries that were
  * already there, in the order the compiler saw them, so the token stream is
  * unchanged -- these are not independent modules and have no include guards
@@ -23,7 +23,7 @@ static RGB img_px(int cx, int cy, int ix, int iy, int art) {
 
 static RGB img_px_raw(int cx, int cy, int ix, int iy, int art) {
     const char *mode = mode_name();
-    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta"), m_storm = !strcmp(mode, "storm"), m_glacier = !strcmp(mode, "glacier"), m_bamboo = !strcmp(mode, "bamboo"), m_solar = !strcmp(mode, "solar"), m_rail = !strcmp(mode, "rail"), m_canyon = !strcmp(mode, "canyon"), m_vinyl = !strcmp(mode, "vinyl"), m_loom = !strcmp(mode, "loom");
+    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta"), m_storm = !strcmp(mode, "storm"), m_glacier = !strcmp(mode, "glacier"), m_bamboo = !strcmp(mode, "bamboo"), m_solar = !strcmp(mode, "solar"), m_rail = !strcmp(mode, "rail"), m_canyon = !strcmp(mode, "canyon"), m_vinyl = !strcmp(mode, "vinyl"), m_loom = !strcmp(mode, "loom"), m_tide = !strcmp(mode, "tide"), m_marble = !strcmp(mode, "marble"), m_cinder = !strcmp(mode, "cinder"), m_origami = !strcmp(mode, "origami");
     uint64_t d = dom_[IDX(cx, cy)];
     if (pc64(d) != 1) {
         if (ghosting()) {
@@ -217,6 +217,51 @@ static RGB img_px_raw(int cx, int cy, int ix, int iy, int art) {
                 c = (RGB){190, 232, 240};
         }
         return c;
+    }
+    if (m_tide) {
+        int band = tiles_[t].e[0] >> 4;
+        double tsec = now_ms() * 0.001;
+        double ph = cx * 0.42 - tsec * 0.95 + sin(cy * 0.78) * 1.4;
+        int current = (int)round(sin(ph) * 1.4);
+        uint32_t h = hash3((uint32_t)(cx * art + ix), (uint32_t)(cy * art + iy), 144);
+        RGB c = TIDEPAL[dither_band(clampb(band + current), cx, cy, ix, iy)];
+        if (band >= 5 && h % 19 < 4) c = (RGB){224, 246, 222};
+        int moonx = (int)(W_ * 0.22 + sin(tsec * 0.12) * W_ * 0.12);
+        int moond = abs(cx - moonx);
+        if (moond > W_ / 2) moond = W_ - moond;
+        if (band >= 5 && moond <= 1) c = (RGB){238, 248, 218};
+        return c;
+    }
+    if (m_marble) {
+        int band = tiles_[t].e[0] >> 4;
+        double tsec = now_ms() * 0.001;
+        double vein = sin(cx * 0.24 + cy * 0.51 +
+                          1.7 * sin(cy * 0.17 - cx * 0.09));
+        double polish = 0.82 + 0.18 * sin(cx * 0.21 - cy * 0.13 + tsec * 0.22);
+        RGB c = MARBLEPAL[dither_band(clampb(band + (int)round(vein * 0.65)),
+                                      cx, cy, ix, iy)];
+        if (fabs(vein) > 0.82) c = (RGB){32, 56, 78};
+        return scalec(c, polish);
+    }
+    if (m_cinder) {
+        int band = tiles_[t].e[0] >> 4;
+        double tsec = now_ms() * 0.001;
+        int drift = (int)round(sin(cy * 0.29 + tsec * 0.34) * 0.8);
+        uint32_t h = hash3((uint32_t)(cx * art + ix), (uint32_t)(cy * art + iy), 144);
+        RGB c = CINDERPAL[dither_band(clampb(band + drift), cx, cy, ix, iy)];
+        if ((h + (uint32_t)(tsec * 2.0)) % 67 < 3 && band <= 4)
+            c = (RGB){255, 176, 72};
+        if (fabs(sin(cx * 0.18 + cy * 0.42)) > 0.93) c = (RGB){28, 20, 20};
+        return c;
+    }
+    if (m_origami) {
+        int band = tiles_[t].e[0] >> 4;
+        uint32_t h = hash3((uint32_t)(cx * art + ix), (uint32_t)(cy * art + iy), 144);
+        double fold = sin((cx + cy) * 0.44 + sin(cx * 0.19) * 1.5);
+        int lift = fold > 0.42 ? 1 : fold < -0.42 ? -1 : 0;
+        RGB c = ORIGAMIPAL[dither_band(clampb(band + lift), cx, cy, ix, iy)];
+        if (fabs(fold) < 0.065) c = (RGB){54, 62, 78};
+        return scalec(c, 0.92 + 0.08 * fold + 0.02 * (h % 8));
     }
     if (m_canyon) {
         int band = tiles_[t].e[0] >> 4;

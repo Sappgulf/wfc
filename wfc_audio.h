@@ -4,7 +4,7 @@
  * and ambient drones, all derived from the registry
  *
  * wfc is deliberately one translation unit: wfc.c includes these parts in
- * order, so `cc -O2 -std=c11 -o wfc wfc.c -lz` still builds the whole thing
+ * order, so `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz` still builds the whole thing
  * with no build system. They are cut at the section boundaries that were
  * already there, in the order the compiler saw them, so the token stream is
  * unchanged -- these are not independent modules and have no include guards

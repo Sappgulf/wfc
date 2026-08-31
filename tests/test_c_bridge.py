@@ -22,15 +22,16 @@ class CBridgeTests(unittest.TestCase):
         subprocess.run(["make"], cwd=ROOT, check=True, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE, text=True)
 
-    def run_wfc(self, worker, *extra, profile_dir=None):
+    def run_wfc(self, worker, *extra, mode="circuit", profile_dir=None,
+                timeout=10):
         env = sandbox.env(WFC_THERMO_PY=os.fspath(worker))
-        args = [os.fspath(BINARY), "--mode", "circuit", "--solver", "thermo",
+        args = [os.fspath(BINARY), "--mode", mode, "--solver", "thermo",
                 "--once", "--w", "6", "--h", "4", "--seed", "7"]
         if profile_dir is not None:
             args.extend(["--thermo-profile", os.fspath(profile_dir)])
         args.extend(extra)
         return subprocess.run(args, cwd=ROOT, env=env, capture_output=True,
-                              text=True, timeout=10)
+                              text=True, timeout=timeout)
 
     def test_fake_worker_uses_incremental_bridge(self):
         result = self.run_wfc(FAKE_WORKER)
@@ -38,6 +39,19 @@ class CBridgeTests(unittest.TestCase):
         self.assertIn("OK mode=circuit 6x4", result.stdout)
         self.assertIn("tries=1 steps=0", result.stdout)
         self.assertNotIn("thermo failed", result.stderr)
+
+    def test_stalled_sidecar_falls_back_to_classic_after_bounded_no_progress(self):
+        """A safe-but-rejected proposal must not spin forever."""
+        try:
+            result = self.run_wfc(
+                FAKE_WORKER, "--w", "8", "--h", "6", mode="waves", timeout=3,
+            )
+        except subprocess.TimeoutExpired as error:
+            self.fail("stalled sidecar did not trip its watchdog: %s" % error)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("OK mode=waves 8x6", result.stdout)
+        self.assertRegex(result.stdout, r"tries=[2-9][0-9]*")
+        self.assertIn("thermo stalled", result.stderr.lower())
 
     def test_c_rejects_worker_completion_that_breaks_hard_edges(self):
         env = sandbox.env(WFC_THERMO_PY=os.fspath(FAKE_WORKER),

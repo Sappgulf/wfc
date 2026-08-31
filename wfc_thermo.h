@@ -4,7 +4,7 @@
  * the counterfactual guard, and the learned-profile loader
  *
  * wfc is deliberately one translation unit: wfc.c includes these parts in
- * order, so `cc -O2 -std=c11 -o wfc wfc.c -lz` still builds the whole thing
+ * order, so `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz` still builds the whole thing
  * with no build system. They are cut at the section boundaries that were
  * already there, in the order the compiler saw them, so the token stream is
  * unchanged -- these are not independent modules and have no include guards
@@ -65,6 +65,10 @@ static uint64_t *thermo_snap_ = NULL;
 static size_t thermo_snap_cap_ = 0;
 static uint64_t *thermo_try_ = NULL;
 static size_t thermo_try_cap_ = 0;
+static long thermo_stall_rounds_ = 0;
+static bool thermo_last_progress_ = false;
+static bool thermo_stalled_ = false;
+#define THERMO_STALL_LIMIT 32
 
 /* the reader's partial-line buffer; a kill has to clear it, see below */
 static char *thermo_lbuf = NULL;
@@ -82,6 +86,7 @@ static void thermo_kill(void) {
     thermo_ready_ = false;
     thermo_waiting_sample_ = false;
     thermo_waiting_feedback_ = false;
+    thermo_last_progress_ = false;
     /* the guard's scratch grids are sized to a world that is now gone */
     free(thermo_snap_); thermo_snap_ = NULL; thermo_snap_cap_ = 0;
     free(thermo_try_);  thermo_try_ = NULL;  thermo_try_cap_ = 0;
@@ -213,6 +218,8 @@ static bool thermo_launch(void) {
     thermo_displaced_ = 0;
     thermo_contradictions_ = 0;
     thermo_quality_ = 0;
+    thermo_stall_rounds_ = 0;
+    thermo_stalled_ = false;
     snprintf(thermo_sampler_, sizeof thermo_sampler_, "boot");
     signal(SIGPIPE, SIG_IGN);
 
@@ -512,6 +519,7 @@ static bool thermo_apply_patch(const char *s) {
         sent = thermo_send_feedback(cells, tiles, count, accepted, rejected,
                                     contradictions, before, after, margin);
     }
+    thermo_last_progress_ = memcmp(thermo_snap_, dom_, sizeof(uint64_t) * cells_n) != 0;
     return sent;
 }
 
@@ -519,7 +527,7 @@ static bool thermo_apply_cfg(const char *s) {
     const char *p = json_str(s, "cfg");
     if (!p || *p != '[') return false;
     size_t cells = (size_t)W_ * (size_t)H_;
-    uint64_t *next = malloc(sizeof(uint64_t) * cells);
+    uint64_t *next = calloc(cells, sizeof *next);
     if (!next) return false;
     p++;
     for (size_t i = 0; i < cells; i++) {
@@ -539,7 +547,10 @@ static bool thermo_apply_cfg(const char *s) {
         }
         uint64_t mask = (uint64_t)1 << tile;
         /* Only accept tiles allowed by this cell's original domain. */
-        if (!(dom_[i] & mask)) { free(next); return false; }
+        if (!(dom_[i] & mask) || !wfc_core_domain_valid(mask, (unsigned)ntiles_)) {
+            free(next);
+            return false;
+        }
         next[i] = mask;
         p = end;
     }
@@ -550,6 +561,7 @@ static bool thermo_apply_cfg(const char *s) {
      * Re-check every directed neighbor pair before accepting its completion. */
     for (size_t i = 0; i < cells; i++) {
         int x = (int)(i % (size_t)W_), y = (int)(i / (size_t)W_);
+        if (!next[i] || (next[i] & (next[i] - 1))) { free(next); return false; }
         int source = __builtin_ctzll(next[i]);
         for (int d = 0; d < NDIR; d++) {
             int nx = x, ny = y;
@@ -558,7 +570,12 @@ static bool thermo_apply_cfg(const char *s) {
             else if (d == 2) ny = g_torus ? (y + 1) % H_ : y + 1;
             else nx = g_torus ? (x + W_ - 1) % W_ : x - 1;
             if (nx < 0 || ny < 0 || nx >= W_ || ny >= H_ || (nx == x && ny == y)) continue;
-            int target = __builtin_ctzll(next[IDX(nx, ny)]);
+            uint64_t target_domain = next[IDX(nx, ny)];
+            if (!target_domain || (target_domain & (target_domain - 1))) {
+                free(next);
+                return false;
+            }
+            int target = __builtin_ctzll(target_domain);
             if (!((cdir_[d][source] >> target) & 1ULL)) {
                 free(next);
                 return false;
@@ -581,6 +598,7 @@ static void thermo_wait_readable(int ms) {
 
 /* Poll the long-lived thermo worker: 0 in progress, 1 solved, -1 failed. */
 static int thermo_poll(void) {
+    bool stalled;
     if (!thermo_inflight_) {
         set_note("thermo: launching THRML\xe2\x80\xa6");
         if (!thermo_launch()) return -1;
@@ -643,6 +661,12 @@ static int thermo_poll(void) {
                             thermo_energy_valid_ = true;
                         if (!thermo_waiting_sample_ || !thermo_apply_patch(s)) goto thermo_fail;
                         thermo_waiting_sample_ = false;
+                        if (thermo_last_progress_) {
+                            thermo_stall_rounds_ = 0;
+                        } else if (++thermo_stall_rounds_ >= THERMO_STALL_LIMIT) {
+                            thermo_stalled_ = true;
+                            goto thermo_fail;
+                        }
                     } else if (!strncmp(tp + 1, "learn", 5) && tp[6] == '"') {
                         thermo_observations_ = json_num(s, "observations", thermo_observations_);
                         thermo_waiting_feedback_ = false;
@@ -683,9 +707,15 @@ static int thermo_poll(void) {
     }
     return 0;
 thermo_fail:
+    stalled = thermo_stalled_;
     thermo_failed_ = true;
     thermo_kill();
-    set_note("thermo failed \xe2\x80\x94 classic solver");
+    if (stalled) {
+        set_note("thermo stalled \xe2\x80\x94 classic solver");
+        fprintf(stderr, "thermo stalled - classic solver\n");
+    } else {
+        set_note("thermo failed \xe2\x80\x94 classic solver");
+    }
     return -1;
 }
 
@@ -831,12 +861,36 @@ static bool picker_matches(const char *name, const char *query) {
     return true;
 }
 
+static bool picker_tag_matches(const ModeSpec *mode, const char *tag) {
+    if (!strcmp(tag, "field")) return mode->group == MG_FIELD;
+    if (!strcmp(tag, "connector")) return mode->group == MG_CONNECTOR;
+    if (!strcmp(tag, "carve")) return mode->group == MG_CARVE;
+    if (!strcmp(tag, "network")) return mode->network;
+    if (!strcmp(tag, "animated")) return mode->tick_ms != 0;
+    if (!strcmp(tag, "coarse")) return mode->coarse;
+    if (!strcmp(tag, "torus")) return mode->torus;
+    if (!strcmp(tag, "static")) return mode->tick_ms == 0;
+    return false;
+}
+
+static bool picker_matches_mode(const ModeSpec *mode, const char *query) {
+    if (query[0] != '#') return picker_matches(mode->name, query);
+    char tag[sizeof g_picker_query];
+    size_t len = strlen(query + 1);
+    if (!len || len >= sizeof tag) return false;
+    for (size_t i = 0; i < len; i++)
+        tag[i] = (char)tolower((unsigned char)query[i + 1]);
+    tag[len] = 0;
+    return picker_tag_matches(mode, tag);
+}
+
 /* Fill `out` with the indices of worlds matching the query; returns the count.
- * With no query every world matches, so the picker doubles as the mode list. */
+ * With no query every world matches, so the picker doubles as the mode list.
+ * A #tag query is derived from the authoritative mode registry. */
 static int picker_collect(int *out, int cap) {
     int n = 0;
     for (int i = 0; i < NMODES && n < cap; i++)
-        if (picker_matches(MODESPEC[i].name, g_picker_query)) out[n++] = i;
+        if (picker_matches_mode(&MODESPEC[i], g_picker_query)) out[n++] = i;
     return n;
 }
 
@@ -853,6 +907,8 @@ static void render_picker(void) {
     fb_fg((RGB){245, 220, 120});
     snprintf(line, sizeof line, "  search: %s\xe2\x96\x88\n\n", g_picker_query);
     fb_puts(line);
+    fb_fg((RGB){120, 132, 148});
+    fb_puts("  tags: #field #connector #network #animated #coarse #torus #static\n\n");
     if (!n) {
         fb_fg((RGB){244, 120, 110});
         fb_puts("  no world matches\n");
@@ -913,7 +969,7 @@ static void render_picker(void) {
     }
     fb_fg((RGB){120, 132, 148});
     snprintf(line, sizeof line,
-             "\n  %d/%d worlds   type to filter   up/down select   enter go   esc cancel\n",
+             "\n  %d/%d worlds   type or #tag to filter   up/down select   enter go   esc cancel\n",
              n, NMODES);
     fb_puts(line);
     fb_puts("\x1b[0m");

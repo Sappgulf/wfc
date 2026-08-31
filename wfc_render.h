@@ -4,7 +4,7 @@
  * every world's render branch, zen dissolves, the raymarcher and iso view
  *
  * wfc is deliberately one translation unit: wfc.c includes these parts in
- * order, so `cc -O2 -std=c11 -o wfc wfc.c -lz` still builds the whole thing
+ * order, so `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz` still builds the whole thing
  * with no build system. They are cut at the section boundaries that were
  * already there, in the order the compiler saw them, so the token stream is
  * unchanged -- these are not independent modules and have no include guards
@@ -162,6 +162,22 @@ static const RGB VINYLPAL[8] = {
 static const RGB LOOMPAL[8] = {
     {17, 13, 11}, {53, 33, 25}, {95, 57, 39}, {139, 87, 53},
     {175, 123, 73}, {205, 163, 109}, {227, 199, 157}, {241, 227, 203},
+};
+static const RGB TIDEPAL[8] = {
+    {3, 14, 28}, {4, 30, 54}, {5, 54, 82}, {8, 82, 108},
+    {16, 116, 132}, {38, 151, 148}, {104, 190, 170}, {214, 235, 202},
+};
+static const RGB MARBLEPAL[8] = {
+    {28, 30, 38}, {55, 60, 72}, {92, 98, 112}, {135, 141, 154},
+    {180, 184, 190}, {212, 211, 204}, {236, 231, 214}, {249, 247, 238},
+};
+static const RGB CINDERPAL[8] = {
+    {8, 8, 10}, {20, 16, 17}, {44, 24, 19}, {78, 32, 18},
+    {120, 44, 16}, {170, 64, 18}, {220, 103, 26}, {255, 190, 86},
+};
+static const RGB ORIGAMIPAL[8] = {
+    {28, 38, 62}, {43, 58, 88}, {62, 80, 116}, {88, 108, 142},
+    {122, 140, 168}, {164, 175, 190}, {210, 205, 188}, {246, 232, 198},
 };
 static const RGB RAILPAL[8] = {
     {12, 13, 16}, {24, 26, 31}, {40, 43, 49}, {60, 64, 72},
@@ -594,6 +610,10 @@ static void render_help(void) {
     static const char *lines[] = {
         "  W A V E   F U N C T I O N   C O L L A P S E  ",
         "",
+        "  QUICK START",
+        "  1  pick a world        2  wait for collapse",
+        "  3  l observatory       4  Q quality heatmap",
+        "",
         "  /       pick a world        m     next mode",
         "  Y       red/green assist     k     CRT scanlines",
         "",
@@ -608,7 +628,7 @@ static void render_help(void) {
         "  l       quality observatory   P     pin/unpin hovered cell\n",
         "  Q       quality heatmap      E     evolve/rank seed variants\n",
         "  F       fit fullscreen       f     drift camera\n",
-        "  wasd    hero walk\n",
+        "  wasd    hero walk (dungeon only)\n",
         "  n       zen: worlds morph    q     quit",
         "",
         "  mouse: left-click force-collapse a cell,",
@@ -626,6 +646,13 @@ static void render_help(void) {
         fb_fg((RGB){148, 200, 255});
         fb_puts(lines[i]);
     }
+    char context[256];
+    snprintf(context, sizeof context, "  current world: %s - %s",
+             mode_name(), mode_spec()->blurb);
+    snprintf(st, sizeof st, "\x1b[%d;6H", row++);
+    fb_puts(st);
+    fb_fg((RGB){255, 190, 90});
+    fb_puts(context);
     fb_puts("\x1b[0m");
     fwrite(fb_, 1, fblen_, stdout);
     fflush(stdout);
@@ -858,7 +885,7 @@ static void zen_capture(void) {
 
 static void paint_cell(int wx, int wy, int sub, double pulse) {
     const char *mode = mode_name();
-    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_truchet = !strcmp(mode, "truchet"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta"), m_storm = !strcmp(mode, "storm"), m_glacier = !strcmp(mode, "glacier"), m_bamboo = !strcmp(mode, "bamboo"), m_solar = !strcmp(mode, "solar"), m_rail = !strcmp(mode, "rail"), m_canyon = !strcmp(mode, "canyon"), m_vinyl = !strcmp(mode, "vinyl"), m_loom = !strcmp(mode, "loom");
+    const bool m_circuit = !strcmp(mode, "circuit"), m_terrain = !strcmp(mode, "terrain"), m_truchet = !strcmp(mode, "truchet"), m_fire = !strcmp(mode, "fire"), m_waves = !strcmp(mode, "waves"), m_dungeon = !strcmp(mode, "dungeon"), m_maze = !strcmp(mode, "maze"), m_galaxy = !strcmp(mode, "galaxy"), m_city = !strcmp(mode, "city"), m_aurora = !strcmp(mode, "aurora"), m_matrix = !strcmp(mode, "matrix"), m_pipes = !strcmp(mode, "pipes"), m_mondrian = !strcmp(mode, "mondrian"), m_koi = !strcmp(mode, "koi"), m_lava = !strcmp(mode, "lava"), m_sakura = !strcmp(mode, "sakura"), m_geode = !strcmp(mode, "geode"), m_lantern = !strcmp(mode, "lantern"), m_dunes = !strcmp(mode, "dunes"), m_reef = !strcmp(mode, "reef"), m_stained = !strcmp(mode, "stained"), m_streets = !strcmp(mode, "streets"), m_neurons = !strcmp(mode, "neurons"), m_mycelium = !strcmp(mode, "mycelium"), m_delta = !strcmp(mode, "delta"), m_storm = !strcmp(mode, "storm"), m_glacier = !strcmp(mode, "glacier"), m_bamboo = !strcmp(mode, "bamboo"), m_solar = !strcmp(mode, "solar"), m_rail = !strcmp(mode, "rail"), m_canyon = !strcmp(mode, "canyon"), m_vinyl = !strcmp(mode, "vinyl"), m_loom = !strcmp(mode, "loom"), m_tide = !strcmp(mode, "tide"), m_marble = !strcmp(mode, "marble"), m_cinder = !strcmp(mode, "cinder"), m_origami = !strcmp(mode, "origami");
     bool braille = !m_terrain;
             if (g_entropy_view && pc64(dom_[IDX(wx, wy)]) > 1) {
                 int k2 = pc64(dom_[IDX(wx, wy)]);
@@ -1341,6 +1368,77 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                                         col = scalec(lerp(col, (RGB){226, 230, 240},
                                                           (sweep - 0.972) / 0.028), pulse);
                                 }
+                            } else if (m_tide || m_marble || m_cinder || m_origami) {
+                                int band = tiles_[t].e[0] >> 4;
+                                double tsec = now_ms() * 0.001;
+                                uint32_t h = hash3((uint32_t)(cx * 41 + chi),
+                                                   (uint32_t)(cy * 37 + sub * 5), 144);
+                                if (m_tide) {
+                                    /* A moon-pulled current bends the bands into
+                                     * long channels, with foam on the crests. */
+                                    double ph = cx * 0.42 - tsec * 0.95 + sin(cy * 0.78) * 1.4;
+                                    int current = (int)round(sin(ph) * 1.4);
+                                    int tb = dither_band(clampb(band + current), wx, wy,
+                                                         chi * 2, sub * 8);
+                                    bits = (uint8_t)((h ^ (h >> 5)) | 0xA5);
+                                    col = scalec(TIDEPAL[tb], pulse * (0.88 + 0.12 * sin(ph)));
+                                    if (tb >= 5 && h % 19 < 4) {
+                                        bits = (uint8_t)(0xFFu ^ (h & 0x24u));
+                                        col = scalec((RGB){224, 246, 222}, pulse);
+                                    }
+                                    int moonx = (int)(W_ * 0.22 + sin(tsec * 0.12) * W_ * 0.12);
+                                    int moond = abs(wx - moonx);
+                                    if (moond > W_ / 2) moond = W_ - moond;
+                                    if (band >= 5 && moond <= 1) {
+                                        bits = 0xFF;
+                                        col = scalec((RGB){238, 248, 218}, pulse);
+                                    }
+                                } else if (m_marble) {
+                                    /* A coherent sine-warp gives one vein field
+                                     * across neighboring cells, then polish sweeps
+                                     * the broad stone planes. */
+                                    double vein = sin(cx * 0.24 + cy * 0.51 +
+                                                      1.7 * sin(cy * 0.17 - cx * 0.09));
+                                    double polish = 0.82 + 0.18 * sin(cx * 0.21 - cy * 0.13 + tsec * 0.22);
+                                    int tb = dither_band(clampb(band + (int)round(vein * 0.65)),
+                                                         wx, wy, chi * 2, sub * 8);
+                                    bits = (uint8_t)((h ^ (h >> 4)) | 0xE7);
+                                    col = scalec(MARBLEPAL[tb], pulse * polish);
+                                    if (fabs(vein) > 0.82) {
+                                        bits = (uint8_t)(0x18u | (h & 0x24u));
+                                        col = scalec((RGB){32, 56, 78}, pulse * 0.82);
+                                    }
+                                } else if (m_cinder) {
+                                    /* Charcoal slabs are cut by rare warm faults;
+                                     * the fault phase drifts slowly like settling ash. */
+                                    int drift = (int)round(sin(cy * 0.29 + tsec * 0.34) * 0.8);
+                                    int tb = dither_band(clampb(band + drift), wx, wy,
+                                                         chi * 2, sub * 8);
+                                    bits = (uint8_t)((h ^ (h >> 6)) | 0x81);
+                                    col = scalec(CINDERPAL[tb], pulse * (0.88 + 0.12 * sin(tsec * 0.8 + wx)));
+                                    if ((h + (uint32_t)(tsec * 2.0)) % 67 < 3 && band <= 4) {
+                                        bits = BRAILLE_BIT[h & 3][(h >> 2) & 1];
+                                        col = scalec((RGB){255, 176, 72}, pulse);
+                                    }
+                                    if (fabs(sin(cx * 0.18 + cy * 0.42)) > 0.93) {
+                                        bits = (uint8_t)(bits & 0x3C);
+                                        col = scalec((RGB){28, 20, 20}, pulse);
+                                    }
+                                } else {
+                                    /* Fold lines alternate plane light. Their
+                                     * diagonal rhythm makes this read as paper,
+                                     * not another generic heightfield. */
+                                    double fold = sin((cx + cy) * 0.44 + sin(cx * 0.19) * 1.5);
+                                    int lift = fold > 0.42 ? 1 : fold < -0.42 ? -1 : 0;
+                                    int tb = dither_band(clampb(band + lift), wx, wy,
+                                                         chi * 2, sub * 8);
+                                    bits = (uint8_t)((h ^ (h >> 7)) | 0xC3);
+                                    col = scalec(ORIGAMIPAL[tb], pulse * (0.92 + 0.08 * fold));
+                                    if (fabs(fold) < 0.065) {
+                                        bits = (uint8_t)(0x18u | (h & 0x42u));
+                                        col = scalec((RGB){54, 62, 78}, pulse * 0.78);
+                                    }
+                                }
                             } else if (m_storm || m_glacier || m_bamboo || m_solar) {
                                 int band = tiles_[t].e[0] >> 4;
                                 double tsec = now_ms() * 0.001;
@@ -1624,6 +1722,10 @@ static void paint_cell(int wx, int wy, int sub, double pulse) {
                             else if (!strcmp(shm, "canyon")) { da = (RGB){24, 15, 13}; db = (RGB){186, 114, 62}; }
                             else if (!strcmp(shm, "vinyl")) { da = (RGB){7, 7, 9}; db = (RGB){96, 96, 110}; }
                             else if (!strcmp(shm, "loom")) { da = (RGB){14, 11, 9}; db = (RGB){178, 128, 78}; }
+                            else if (!strcmp(shm, "tide")) { da = (RGB){3, 14, 28}; db = (RGB){104, 190, 170}; }
+                            else if (!strcmp(shm, "marble")) { da = (RGB){28, 30, 38}; db = (RGB){236, 231, 214}; }
+                            else if (!strcmp(shm, "cinder")) { da = (RGB){8, 8, 10}; db = (RGB){170, 64, 18}; }
+                            else if (!strcmp(shm, "origami")) { da = (RGB){28, 38, 62}; db = (RGB){210, 205, 188}; }
                             for (int yy = 0; yy < 4; yy++)
                                 for (int xx = 0; xx < 2; xx++)
                                     if ((hash3((uint32_t)cx, (uint32_t)cy,
@@ -1833,6 +1935,10 @@ static RGB rt_albedo(int band) {
     }
     if (!strcmp(m, "waves")) return WAVEPAL[band];
     if (!strcmp(m, "aurora")) return AURPAL[band];
+    if (!strcmp(m, "tide")) return TIDEPAL[band];
+    if (!strcmp(m, "marble")) return MARBLEPAL[band];
+    if (!strcmp(m, "cinder")) return CINDERPAL[band];
+    if (!strcmp(m, "origami")) return ORIGAMIPAL[band];
     return (RGB){(uint8_t)(40 + band * 26), (uint8_t)(48 + band * 18), (uint8_t)(52 + band * 12)};
 }
 static V3 rt_sun = {-0.55f, 0.62f, 0.42f};

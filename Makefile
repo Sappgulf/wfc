@@ -2,32 +2,33 @@ CC ?= cc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra
 LDLIBS = -lz
 
-# wfc is one translation unit: wfc.c includes these parts in order, so the
-# plain `cc -O2 -std=c11 -o wfc wfc.c -lz` in the README still works. They are
-# listed here only so editing one triggers a rebuild.
+# wfc's main program is one translation unit: wfc.c includes these parts in
+# order. wfc_core.c is the small independent invariant module. The files are
+# listed here so editing one triggers a rebuild.
 PARTS = wfc_world.h wfc_render.h wfc_export.h wfc_audio.h wfc_thermo.h wfc_ui.h
+CORE = wfc_core.c wfc_core.h
 
-wfc: wfc.c $(PARTS)
-	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
+wfc: wfc.c $(PARTS) $(CORE)
+	$(CC) $(CFLAGS) -o $@ $< wfc_core.c $(LDLIBS)
 
 # sanitizer build: ./wfc with ASan+UBSan reporting
-wfc_asan: wfc.c $(PARTS)
+wfc_asan: wfc.c $(PARTS) $(CORE)
 	$(CC) -O1 -g -std=c11 -Wall -Wextra -fsanitize=address,undefined \
-		-fno-omit-frame-pointer -o wfc_asan $< $(LDLIBS)
+		-fno-omit-frame-pointer -o wfc_asan $< wfc_core.c $(LDLIBS)
 
 asan: wfc_asan
 
 # pedantic warning sweep: must compile with zero output
-strict: wfc.c $(PARTS)
+strict: wfc.c $(PARTS) $(CORE)
 	$(CC) -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
-		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /dev/null $< $(LDLIBS)
+		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /dev/null $< wfc_core.c $(LDLIBS)
 
-debug: wfc.c $(PARTS)
-	$(CC) -O0 -g -std=c11 -Wall -Wextra -o wfc_debug $< $(LDLIBS)
+debug: wfc.c $(PARTS) $(CORE)
+	$(CC) -O0 -g -std=c11 -Wall -Wextra -o wfc_debug $< wfc_core.c $(LDLIBS)
 
 test: wfc
 	@set -e; for m in $$(./wfc --list-modes); do \
-		./wfc --mode $$m --w 40 --h 20 --once >/dev/null; \
+		./wfc --mode $$m --seed 4242 --w 40 --h 20 --once >/dev/null; \
 		printf '  %-9s ok\n' $$m; \
 	done
 	@./wfc --collage /tmp/wfc_test_collage.png >/dev/null
@@ -59,7 +60,9 @@ python-check:
 	@python3 -m py_compile wfc_learning.py wfc_thermo.py tests/fake_thermo.py \
 		tests/test_wfc_learning.py tests/test_protocol_contract.py tests/test_c_bridge.py \
 		tests/test_quality_studio.py tests/quality_benchmark.py tests/test_quality_benchmark.py \
-		tests/test_interactive.py
+		tests/test_interactive.py tests/test_docs.py tests/test_fuzz_headless.py \
+		tests/test_cli_features.py tests/test_performance_gate.py tests/fuzz_headless.py \
+		tests/performance_gate.py tests/thermo_sweep.py
 	@echo 'python: syntax OK'
 
 protocol-check:
@@ -91,11 +94,39 @@ interactive-check: wfc
 
 studio-c-check:
 	@cc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
-		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /tmp/wfc_studio_test tests/test_wfc_studio.c -lz
+		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /tmp/wfc_studio_test \
+		tests/test_wfc_studio.c wfc_core.c -lz
 	@/tmp/wfc_studio_test
 
+core-check:
+	@cc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
+		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /tmp/wfc_core_test \
+		tests/test_wfc_core.c wfc_core.c
+	@/tmp/wfc_core_test
+	@echo 'core: domain invariants OK'
+
 quality-benchmark: wfc
-	@python3 tests/quality_benchmark.py --binary ./wfc --trials 1 --w 8 --h 6
+	@python3 tests/quality_benchmark.py --binary ./wfc --trials 2 --w 8 --h 6
+
+performance-check: wfc
+	@python3 -m unittest tests.test_quality_benchmark tests.test_performance_gate -v
+
+perf-check: wfc
+	@python3 tests/performance_gate.py --binary ./wfc \
+		--budget tests/performance_budget.json --trials 2 --w 8 --h 6
+
+docs-check: wfc
+	@python3 -m unittest tests.test_docs -v
+
+cli-check: wfc
+	@python3 -m unittest tests.test_cli_features -v
+
+thermo-check: wfc wfc_asan
+	@python3 tests/thermo_sweep.py --binary ./wfc_asan --worker ./tests/fake_thermo.py
+
+interactive-asan-check: wfc_asan
+	@WFC_BINARY=./wfc_asan ASAN_OPTIONS=detect_leaks=0 \
+		python3 -m unittest tests.test_interactive -v
 
 # every mode against every render toggle, under ASan+UBSan
 sweep: wfc_asan
@@ -112,28 +143,14 @@ sweep: wfc_asan
 	done; \
 	[ $$fail -eq 0 ] && echo "sweep: $$runs mode/option combos clean"
 
-fuzz: wfc_asan
-	@set -e; modes=$$(./wfc --list-modes); n=$$(echo "$$modes" | wc -l | tr -d ' '); \
-	fail=0; \
-	for i in $$(seq 1 25); do \
-		m=$$(echo "$$modes" | sed -n $$((RANDOM % $$n + 1))p); \
-		s=$$((RANDOM * 32768 + RANDOM)); \
-		w=$$((RANDOM % 90 + 6)); h=$$((RANDOM % 40 + 6)); \
-		extra=""; \
-		[ $$((RANDOM % 3)) -eq 0 ] && extra="$$extra --pan"; \
-		[ $$((RANDOM % 3)) -eq 0 ] && extra="$$extra --no-bloom"; \
-		[ $$((RANDOM % 3)) -eq 0 ] && extra="$$extra --no-weather"; \
-		[ $$((RANDOM % 4)) -eq 0 ] && extra="$$extra --zoom 3"; \
-		ASAN_OPTIONS=detect_leaks=0 ./wfc_asan --mode $$m --seed $$s --w $$w --h $$h \
-			--once $$extra >/dev/null 2>/tmp/wfc_fuzz_err.log || { \
-			echo "FAIL: $$m seed=$$s $${w}x$$h$$extra"; cat /tmp/wfc_fuzz_err.log; fail=1; break; }; \
-	done; \
-	[ $$fail -eq 0 ] && echo "fuzz: 25 random combos clean"
+fuzz: wfc wfc_asan
+	@python3 tests/fuzz_headless.py --binary ./wfc_asan --runs 50 --seed 20260831
 
 # everything a change has to survive before it lands
 check: strict test regression python-check protocol-check bridge-check \
-       learning-check quality-check studio-check studio-c-check \
-       interactive-check quality-benchmark sweep fuzz
+	   learning-check quality-check studio-check studio-c-check \
+	   core-check docs-check cli-check thermo-check interactive-check \
+	   interactive-asan-check performance-check perf-check quality-benchmark sweep fuzz
 	@echo "check: all suites clean"
 
 clean:
@@ -142,4 +159,4 @@ clean:
 install: wfc
 	install -m 0755 wfc /usr/local/bin/wfc
 
-.PHONY: check clean install asan strict debug test regression python-check protocol-check bridge-check learning-check quality-check studio-check studio-c-check interactive-check quality-benchmark sweep fuzz
+.PHONY: check clean install asan strict debug test regression python-check protocol-check bridge-check learning-check quality-check studio-check studio-c-check core-check docs-check cli-check thermo-check interactive-check interactive-asan-check performance-check perf-check quality-benchmark sweep fuzz

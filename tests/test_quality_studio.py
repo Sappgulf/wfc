@@ -36,6 +36,24 @@ class QualityStudioTests(unittest.TestCase):
             "bamboo", "solar", "rail",
         })
 
+    def test_new_field_modes_are_registered_as_a_complete_family(self):
+        """The next visual family must be discoverable before it is rendered."""
+        modes = self.run_wfc("--list-modes").stdout.splitlines()
+        self.assertEqual(len(modes), 37)
+        self.assertTrue(set(modes) >= {"tide", "marble", "cinder", "origami"})
+
+    def test_rail_uses_topology_quality_instead_of_the_neutral_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = Path(temp_dir) / "rail.json"
+            result = self.run_wfc(
+                "--mode", "rail", "--seed", "7", "--w", "8", "--h", "6",
+                "--once", "--report", os.fspath(report),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(report.read_text(encoding="utf-8"))
+        self.assertLess(payload["quality"]["topology"], 0.999999,
+                         "rail must not receive the neutral topology score")
+
     def test_report_contains_reproducibility_quality_thermo_and_studio(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             report = Path(temp_dir) / "world.json"
@@ -109,6 +127,8 @@ class QualityStudioTests(unittest.TestCase):
         result = self.run_wfc("--help")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--report FILE", result.stdout)
+        self.assertIn("--world-file FILE", result.stdout)
+        self.assertIn("--inspect-world FILE", result.stdout)
         self.assertIn("l observatory", result.stdout)
         self.assertIn("P pin", result.stdout)
         self.assertIn("Q heatmap", result.stdout)
