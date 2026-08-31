@@ -224,14 +224,20 @@ kept, so the learner sees the consequence of its own move.
 Each feedback frame carries the complete mode-aware quality
 vector, a weighted metric delta, and the active per-tile quality prior; the
 learner records bounded metric and objective history in addition to tile,
-compatible-pair, and boundary-context preferences. Everything is bounded,
+compatible-pair, and boundary-context preferences. A context preference acts
+through how much each tile puts down — a crossing against a dead end, a crest
+against a trough — which C reads off the tile edges and ships in the init
+frame, since the compatibility masks the worker receives cannot tell those
+apart. Everything is bounded,
 fingerprinted per mode, and atomically persisted in `~/.wfc-thermo` (or
 `--thermo-profile DIR`). `--no-learn` keeps a run ephemeral. `--learned` goes the other way: the
 classic solver reads the profile the worker wrote and applies its tile
 preferences to its own weighted pick, in the same log space the worker scores
 in — so a world you have been solving keeps getting better with no Python
 running at all. Over 40 training runs on streets and 40 unseen evaluation
-seeds it lifted classic quality from 0.9577 to 0.9679, better on 40 of 40.
+seeds it lifted classic quality from 0.9577 to 0.9694, better on 40 of 40.
+It applies both the learned tile preferences and the learned context
+preferences.
 A profile whose tile count does not match the active tileset is ignored. Over 30 runs on streets at 24x14, learning
 takes the displacement rate from 25.2% to 24.3% and quality from 0.9720 to
 0.9729, against a flat 26.5% / 0.969 for the `--no-learn` control. The worker
