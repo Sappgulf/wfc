@@ -79,6 +79,8 @@ favorite, rename, or safely delete snapshots.
 `Q` quality heatmap · `E` Evolution Lab (rank seed variants) · `x` repair hotspot ·
 `F` fit the live terminal viewport ·
 `:` command palette · `B` session browser ·
+`t` sculpt brush / `[` `]` choose brush tile · arrow keys replay timeline ·
+`D` Director Mode (cycle + morph + camera + audio) ·
 `Y` red/green colour assist · `w a s d` hero crawl
 through solved dungeons (light all the torches; `a` moves left there) · `h` help · `q` quit
 
@@ -118,6 +120,8 @@ into green. The blue shift separates them by 55% instead.
 --daycycle   terrain dawn/dusk
 --sound      synth sfx + per-world ambient drones
 --solver     classic | thermo[=potts|ising] | thermo-accelerated
+--director   cycle + zen + camera + audio presentation mode
+--compare N|word  compare this deterministic map against another seed
 --no-learn   disable persistent thermo preferences
 --thermo-profile DIR  store thermo profiles in DIR
 --reset-learning     clear the active thermo profile before sampling
@@ -128,6 +132,11 @@ into green. The blue shift separates them by 55% instead.
 --once       exit after one map
 ```
 
+Replay links can be opened directly as `./wfc wfc://circuit/7`, or passed with
+`--link`. On macOS, dropping a `.wfc` or `.bin` snapshot onto the executable
+opens it in the interactive studio. `packaging/macos/WFC.command` is also a
+double-clickable launcher for the source checkout or bundled app.
+
 The quality observatory (`l`) pauses the current run and shows the active
 mode focus, all eight quality dimensions, thermo counters, and a bounded
 64-sample trend. It also names the current macro skeleton and the weakest
@@ -137,7 +146,8 @@ diagnostic only; it never changes domains.
 
 `--report FILE.json` writes a reproducible schema-2 snapshot for scripts,
 including the actual solver backend, mode, seed, dimensions, profile weights, hotspot details,
-macro guidance, Evolution Lab scores, learner counters, and pin count. `P`
+macro guidance, Evolution Lab scores, learner counters, pin count, and a stable
+semantic signature. `P`
 pins the hovered singleton (collapsing it transactionally if needed); `P` again
 or right-click reopens it only where current neighbors allow. `u` restores the
 previous domain and pin state.
@@ -159,6 +169,16 @@ then newest files, and supports Enter to resume, `F` to favorite, `r` to rename,
 and a confirming `dd` to delete.
 In the observatory, `x` runs a bounded repair pass for the current hotspot while
 preserving pinned cells.
+
+The sculpt brush (`t`) makes repeated edits intentional: hover a solved cell to
+pick its tile, toggle the brush, then click or drag to paint that tile. `[` and
+`]` cycle the active tile. Every stroke still checks the current domain, runs
+propagation, and remains undoable with `u`; an incompatible stroke is refused.
+
+The Director (`D`, or `--director`) is the presentation preset: it enables
+auto-cycle, zen morphing, camera drift, and the soundtrack together. It is
+remembered in session metadata, and the HUD labels the active presentation so
+an unattended terminal remains legible.
 
 `E` opens the Evolution Lab in classic single-world mode. It derives a small
 tournament of seeds from the current seed, replays current pins into every
@@ -194,6 +214,11 @@ grid without changing a single generated map.
 
 `--solver thermo` works with `--infinite` too: the world regrows, and the
 worker is re-initialised against the new one.
+
+The thermo sidecar now stays warm after a successful map. The next map sends a
+fresh `init` frame through the existing JSONL process, preserving imports and
+learner state instead of starting another Python child. The C bridge still owns
+hard constraints and kills the worker during shutdown or fallback.
 
 Headless runs are intentionally bounded: `--twin`, `--quad`, and
 `--infinite` require an interactive terminal. Numeric options are validated
@@ -363,6 +388,10 @@ annotations, hotspot metadata, and replay links. Select cards and use
 “compare selected” to see the quality range and delta before opening a
 `wfc://mode/seed` replay link.
 
+For headless experiments, `--compare SEED` solves a second deterministic seed
+at the same dimensions, restores the primary map, and prints its quality delta;
+the primary `--save` and `--report` artifacts remain authoritative.
+
 ## Test discipline
 
 `make check-fast` is the local edit loop: independent-module contracts,
@@ -399,7 +428,8 @@ the full gate.
 - `make audio-smoke` verifies WAV generation and the configured player boundary
 - `make doctor` prints machine-readable capability information with `--json`
 - `make visual-regression` checks deterministic 8x6 render hashes for every mode
-- `make macos-bundle` builds `dist/WFC.app`; `make macos-tarball` packages it
+- `make macos-bundle` builds `dist/WFC.app` with the `wfc://` URL scheme and
+  `WFC.command` launcher; `make macos-tarball` packages it
 - `make check-fast` is suitable for every edit; `make check-full` is the release gate
 
 ~9,000 lines of C, ~1,600 lines of Python. `make` builds the application; the

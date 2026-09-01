@@ -61,7 +61,7 @@
 #include "wfc_ui.h"
 
 /* ---------------- main ---------------- */
-#define WFC_VERSION "0.5.0"
+#define WFC_VERSION "0.6.0"
 
 static bool parse_long_range(const char *text, long min, long max, long *out) {
     if (!text || !*text) return false;
@@ -116,6 +116,24 @@ static bool parse_seed_value(const char *text, uint64_t *out) {
     }
     if (digits) return parse_u64_decimal(text, out);
     if (out) *out = hash_seed_word(text);
+    return true;
+}
+
+static int find_mode(const char *name);
+static bool parse_link_value(const char *link, int *mode_out, uint64_t *seed_out) {
+    char value[128];
+    if (!link || strlen(link) >= sizeof value) return false;
+    snprintf(value, sizeof value, "%s", link);
+    char *modepart = strstr(value, "://");
+    modepart = modepart ? modepart + 3 : value;
+    char *slash = strchr(modepart, '/');
+    if (!slash || slash == modepart || !slash[1] || strchr(slash + 1, '/')) return false;
+    *slash = 0;
+    int mode = find_mode(modepart);
+    uint64_t seed;
+    if (mode < 0 || !parse_u64_decimal(slash + 1, &seed)) return false;
+    if (mode_out) *mode_out = mode;
+    if (seed_out) *seed_out = seed;
     return true;
 }
 
@@ -252,11 +270,12 @@ static bool studio_session_write_metadata(void) {
     bool ok = fprintf(f,
         "schema=1\nmode=%s\nseed=%llu\ntheme=%d\nspeed=%ld\nbias=%d\n"
         "sound=%d\ncrt=%d\nzen=%d\ncolorblind=%d\npan=%d\nheatmap=%d\n"
-        "entropy=%d\nfavorite=%d\nannotation=%s\n",
+        "entropy=%d\nfavorite=%d\ndirector=%d\nbrush=%d\nbrush_tile=%d\nannotation=%s\n",
         mode_name(), (unsigned long long)g_seed, g_theme & 7, g_speed,
         (int)(g_bias * 1000.0 + 0.5), (int)g_sound, (int)g_crt, (int)g_zen,
         (int)g_colorblind, (int)g_pan, (int)g_heatmap, (int)g_entropy_view,
-        (int)g_session_favorite,
+        (int)g_session_favorite, (int)g_director, (int)g_brush_enabled,
+        g_brush_tile,
         g_session_annotation[0] ? g_session_annotation : mode_spec()->blurb) >= 0;
     if (ok) ok = wfc_artifact_commit(f, temp, g_session_meta_path);
     else wfc_artifact_abort(f, temp);
@@ -293,13 +312,61 @@ static bool studio_session_load(void) {
         else if (!strcmp(line, "heatmap") && parse_long_range(v, 0, 1, &value)) g_heatmap = value != 0;
         else if (!strcmp(line, "entropy") && parse_long_range(v, 0, 1, &value)) g_entropy_view = value != 0;
         else if (!strcmp(line, "favorite") && parse_long_range(v, 0, 1, &value)) g_session_favorite = value != 0;
+        else if (!strcmp(line, "director") && parse_long_range(v, 0, 1, &value)) g_director = value != 0;
+        else if (!strcmp(line, "brush") && parse_long_range(v, 0, 1, &value)) g_brush_enabled = value != 0;
+        else if (!strcmp(line, "brush_tile") && parse_long_range(v, 0, MAXT - 1, &value)) g_brush_tile = (int)value;
         else if (!strcmp(line, "annotation")) snprintf(g_session_annotation, sizeof g_session_annotation, "%s", v);
     }
     fclose(f);
     BIOMES = BIOMES_SEASONAL[(g_theme & 7) >= 4 ? (g_theme & 7) - 4 : 0];
+    if (g_director) {
+        g_cycle = true; g_zen = true; g_pan = true; g_sound = true;
+    }
+    if (g_brush_tile >= ntiles_) g_brush_tile = 0;
     speed_changed();
     full_repaint_ = true;
     return true;
+}
+
+/* Compare a second deterministic seed without losing the primary map. This
+ * uses the same small gallery solver as the web showcase, then restores the
+ * user's exact domains so --save/--report still describe the requested seed. */
+static bool compare_seed_quality(uint64_t seed, QualityMetrics *out) {
+    if (!out || !dom_ || W_ <= 0 || H_ <= 0 || g_nworlds != 1) return false;
+    size_t cells = (size_t)W_ * H_;
+    uint64_t *saved_dom = malloc(sizeof *saved_dom * cells);
+    uint8_t *saved_pin = malloc(cells), *saved_tile = malloc(cells);
+    if (!saved_dom || !saved_pin || !saved_tile) {
+        free(saved_dom); free(saved_pin); free(saved_tile);
+        return false;
+    }
+    int saved_mode = g_mode_idx, saved_w = W_, saved_h = H_;
+    uint64_t saved_seed = g_seed;
+    bool saved_seed_set = g_seed_set;
+    double saved_bias = g_bias;
+    int saved_decided = g_decided;
+    memcpy(saved_dom, dom_, sizeof *saved_dom * cells);
+    memcpy(saved_pin, studio_pin_, cells);
+    memcpy(saved_tile, studio_tile_, cells);
+    bool solved = gallery_solve(saved_mode, seed, saved_w, saved_h);
+    if (solved) *out = quality_measure(true);
+
+    setup_mode(saved_mode);
+    g_seed = saved_seed;
+    g_seed_set = saved_seed_set;
+    g_bias = saved_bias;
+    W_ = saved_w; H_ = saved_h;
+    grid_alloc(W_, H_);
+    memcpy(dom_, saved_dom, sizeof *saved_dom * cells);
+    memcpy(studio_pin_, saved_pin, cells);
+    memcpy(studio_tile_, saved_tile, cells);
+    g_decided = saved_decided;
+    studio_pin_count_ = 0;
+    for (size_t i = 0; i < cells; i++) studio_pin_count_ += studio_pin_[i] != 0;
+    apply_bias();
+    full_repaint_ = true;
+    free(saved_dom); free(saved_pin); free(saved_tile);
+    return solved;
 }
 
 int main(int argc, char **argv) {
@@ -315,6 +382,34 @@ int main(int argc, char **argv) {
     char inspect_path[512] = {0};
 #define NEXTV() (++i < argc ? argv[i] : (fprintf(stderr, "missing value for %s\n", argv[i - 1]), exit(2), (char *)NULL))
     for (int i = 1; i < argc; i++) {
+        if (argv[i][0] != '-' && i == 1) {
+            size_t len = strlen(argv[i]);
+            if (strstr(argv[i], "://")) {
+                int link_mode; uint64_t link_seed;
+                if (!parse_link_value(argv[i], &link_mode, &link_seed)) {
+                    fprintf(stderr, "invalid replay link: %s\n", argv[i]);
+                    return 2;
+                }
+                setup_mode(link_mode);
+                g_seed = link_seed;
+                g_seed_set = true;
+                continue;
+            }
+            if (len >= 4 && (!strcmp(argv[i] + len - 4, ".wfc") ||
+                             !strcmp(argv[i] + len - 4, ".bin"))) {
+                if (!copy_path_arg(g_world_path, sizeof g_world_path, argv[i], "dropped snapshot"))
+                    return 2;
+                int n = snprintf(g_session_meta_path, sizeof g_session_meta_path, "%s.meta", g_world_path);
+                if (n < 0 || (size_t)n >= sizeof g_session_meta_path) {
+                    fprintf(stderr, "invalid dropped snapshot: metadata path is too long\n");
+                    return 2;
+                }
+                g_session_enabled = true;
+                g_open_requested = true;
+                session_dir_from_path(g_world_path);
+                continue;
+            }
+        }
         if (!strcmp(argv[i], "--version")) {
             printf("wfc %s\n", WFC_VERSION);
             return 0;
@@ -387,6 +482,21 @@ int main(int argc, char **argv) {
             }
             else { fprintf(stderr, "solver must be classic|thermo|thermo-accelerated(=potts|=ising)\n"); return 2; }
         }
+        else if (!strcmp(argv[i], "--director")) {
+            g_director = true;
+            g_cycle = true;
+            g_zen = true;
+            g_sound = true;
+            g_pan = true;
+        }
+        else if (!strcmp(argv[i], "--compare")) {
+            const char *v = NEXTV();
+            if (!parse_seed_value(v, &g_compare_seed)) {
+                fprintf(stderr, "invalid value for --compare: %s\n", v);
+                return 2;
+            }
+            g_compare_set = true;
+        }
         else if (!strcmp(argv[i], "--no-learn")) g_thermo_learn = false;
         else if (!strcmp(argv[i], "--thermo-profile")) {
             const char *profile = NEXTV();
@@ -435,24 +545,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--gfx")) g_force_gfx = true;
         else if (!strcmp(argv[i], "--no-gfx")) g_no_gfx = true;
         else if (!strcmp(argv[i], "--link")) {
-            char lk[128];
             const char *link = NEXTV();
-            if (strlen(link) >= sizeof lk) {
-                fprintf(stderr, "invalid --link value: too long\n");
-                return 2;
-            }
-            snprintf(lk, sizeof lk, "%s", link);
-            char *s2 = strstr(lk, "://");
-            char *modepart = s2 ? s2 + 3 : lk;
-            char *slash = strchr(modepart, '/');
-            uint64_t seed;
-            if (!slash || slash == modepart || !slash[1] || strchr(slash + 1, '/') ) {
-                fprintf(stderr, "invalid --link value: %s\n", link);
-                return 2;
-            }
-            *slash = '\0';
-            int mode = find_mode(modepart);
-            if (mode < 0 || !parse_u64_decimal(slash + 1, &seed)) {
+            int mode; uint64_t seed;
+            if (!parse_link_value(link, &mode, &seed)) {
                 fprintf(stderr, "invalid --link value: %s\n", link);
                 return 2;
             }
@@ -568,6 +663,8 @@ int main(int argc, char **argv) {
                    "  --inspect-world FILE             validate and print WFC1 metadata as JSON\n"
                    "  --solver classic|thermo|thermo-accelerated\n"
                    "                                   collapse engine; accelerated uses THRML/JAX\n"
+                   "  --director                       cycle + zen + audio + camera presentation mode\n"
+                   "  --compare SEED                  compare this map's quality with another seed\n"
                    "  --no-learn                       disable persistent thermo preferences\n"
                    "  --thermo-profile DIR             store thermo profiles in DIR\n"
                    "  --reset-learning                 clear the active thermo profile\n"
@@ -602,7 +699,7 @@ int main(int argc, char **argv) {
                    "      i iso | , . scrub collapse | wasd hero in dungeon\n"
                    "      l observatory | Q heatmap | E evolution | P pin/unpin hover\n"
                    "      x repair hotspot | F favorite in picker/browser\n"
-                   "      : command palette | B session browser\n"
+                   "      : command palette | B session browser | arrows replay timeline\n"
                    "      F fullscreen fit | +/- speed p pause g gif s save q quit\n"
                    "build: make\n");
             return 0;
@@ -720,6 +817,11 @@ int main(int argc, char **argv) {
     W_ = H_ = 0;
     apply_size();
 
+    if (g_open_requested && !studio_session_load()) {
+        fprintf(stderr, "failed to open dropped snapshot: %s\n", g_world_path);
+        return 1;
+    }
+
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
     signal(SIGWINCH, on_winch);
@@ -806,6 +908,8 @@ int main(int argc, char **argv) {
         }
         QualityMetrics qm = quality_measure(true);
         quality_record(qm);
+        QualityMetrics compare_q = {0};
+        bool compared = g_compare_set && compare_seed_quality(g_compare_seed, &compare_q);
         if (g_sound) { ensure_sfx(); play_sfx(SFX_DONE); }
         if (getenv("WFC_DEBUG")) {
             double qr = quality_reward((QualityMetrics){0}, qm, W_ * H_, 0);
@@ -822,11 +926,18 @@ int main(int argc, char **argv) {
             fprintf(stderr, "failed to write report %s: %s\n", g_report_path, strerror(errno));
             return 1;
         }
-        printf("OK mode=%s %dx%d seed=%llu tries=%d steps=%ld%s%s%s%s%s%s\n",
+        printf("OK mode=%s %dx%d seed=%llu tries=%d steps=%ld%s%s%s%s%s%s%s%s\n",
                mode_name(), W_, H_, (unsigned long long)g_seed, tries, total,
                g_save_path[0] ? " saved=" : "", g_save_path[0] ? g_save_path : "",
                g_gif_on ? " gif=" : "", g_gif_on ? gp : "",
-               g_report_path[0] ? " report=" : "", g_report_path[0] ? g_report_path : "");
+               g_report_path[0] ? " report=" : "", g_report_path[0] ? g_report_path : "",
+               compared ? " compare=" : "",
+               compared ? "ready" : "");
+        if (compared)
+            printf("COMPARE seed=%llu quality=%.3f delta=%+.3f\n",
+                   (unsigned long long)g_compare_seed, compare_q.total,
+                   compare_q.total - qm.total);
+        thermo_kill();
         return 0;
     }
 
@@ -1078,6 +1189,7 @@ inf_continue:
     fputs("\x1b[0m\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?25h\x1b[?1049l", stdout);
     putchar('\n');
     ambient_stop();
+    thermo_kill();
     if (g_zen && g_gif_on && g_nframes > 1) { /* flush the accumulated morph loop */
         char gp[512];
         if (g_gif_path[0]) snprintf(gp, sizeof gp, "%s", g_gif_path);

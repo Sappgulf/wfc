@@ -89,6 +89,34 @@ class CliFeatureTests(unittest.TestCase):
         self.assertIn("thermo-accelerated", result.stdout)
         self.assertIn(": command palette", result.stdout)
         self.assertIn("B session browser", result.stdout)
+        self.assertIn("--director", result.stdout)
+        self.assertIn("--compare", result.stdout)
+
+    def test_replay_links_and_compare_seed_keep_the_cli_deterministic(self):
+        linked = self.run_wfc("wfc://circuit/7", "--w", "4", "--h", "3", "--once")
+        self.assertEqual(linked.returncode, 0, linked.stderr)
+        self.assertIn("OK mode=circuit 4x4 seed=7", linked.stdout)
+
+        compared = self.run_wfc(
+            "--mode", "fire", "--seed", "9", "--w", "4", "--h", "3",
+            "--once", "--compare", "10",
+        )
+        self.assertEqual(compared.returncode, 0, compared.stderr)
+        self.assertIn("COMPARE seed=10", compared.stdout)
+        self.assertRegex(compared.stdout, r"delta=[+-]0\.\d{3}")
+
+    def test_report_contains_stable_semantic_signature(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            result = self.run_wfc(
+                "--mode", "circuit", "--seed", "7", "--w", "4", "--h", "3",
+                "--once", "--report", os.fspath(report),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(report.read_text(encoding="utf-8"))
+        self.assertRegex(payload["signature"], r"^[0-9a-f]{16}$")
+        self.assertEqual(payload["studio"]["director"], False)
+        self.assertEqual(payload["studio"]["brush"], False)
 
     def test_inspect_world_reports_metadata_and_rejects_tampering(self):
         with tempfile.TemporaryDirectory() as tmp:

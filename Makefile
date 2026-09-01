@@ -1,7 +1,7 @@
 CC ?= cc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra
 LDLIBS = -lz
-VERSION ?= 0.5.0
+VERSION ?= 0.6.0
 PREFIX ?= /usr/local
 BUNDLE ?= dist/WFC.app
 MACOS_ARCH := $(shell uname -m)
@@ -161,6 +161,7 @@ macos-bundle: wfc
 	@install -m 0755 wfc "$(BUNDLE)/Contents/MacOS/wfc"
 	@install -m 0644 wfc_thermo.py wfc_learning.py "$(BUNDLE)/Contents/MacOS/"
 	@install -m 0644 packaging/macos/Info.plist "$(BUNDLE)/Contents/Info.plist"
+	@install -m 0755 packaging/macos/WFC.command "$(BUNDLE)/Contents/Resources/WFC.command"
 	@install -m 0644 README.md "$(BUNDLE)/Contents/Resources/README.md"
 	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(BUNDLE)/Contents/Info.plist"
 	@plutil -replace CFBundleVersion -string "$(VERSION)" "$(BUNDLE)/Contents/Info.plist"

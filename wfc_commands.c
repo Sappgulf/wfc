@@ -16,6 +16,7 @@ static const WfcCommand COMMANDS[] = {
     {WFC_COMMAND_SAVE,        "save image", "write the current map image"},
     {WFC_COMMAND_AUDIO,       "audio",      "toggle synthesized sound"},
     {WFC_COMMAND_FULLSCREEN,  "fullscreen", "fit the world to the terminal"},
+    {WFC_COMMAND_DIRECTOR,    "director",   "cycle, morph, pan, and soundtrack presentation"},
     {WFC_COMMAND_QUIT,        "quit",       "exit wfc"},
 };
 

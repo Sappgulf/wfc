@@ -70,6 +70,7 @@ static long thermo_stall_rounds_ = 0;
 static bool thermo_last_progress_ = false;
 static bool thermo_stalled_ = false;
 static bool thermo_fallback_ = false;
+static bool thermo_warm_ = false;
 #define THERMO_STALL_LIMIT 32
 
 /* the reader's partial-line buffer; a kill has to clear it, see below */
@@ -88,6 +89,7 @@ static void thermo_kill(void) {
     thermo_ready_ = false;
     thermo_waiting_sample_ = false;
     thermo_waiting_feedback_ = false;
+    thermo_warm_ = false;
     thermo_last_progress_ = false;
     /* the guard's scratch grids are sized to a world that is now gone */
     free(thermo_snap_); thermo_snap_ = NULL; thermo_snap_cap_ = 0;
@@ -129,94 +131,98 @@ static bool thermo_launch(void) {
      * against the new one. */
     if (g_gallery_path[0] || g_collage_path[0] || g_nworlds > 1) return false;
     if (getenv("WFC_NO_THERMO")) return false;
-    char py[512];
-    const char *pyp = getenv("WFC_THERMO_PY");
-    if (pyp) snprintf(py, sizeof py, "%s", pyp);
-    else {
-        /* find wfc_thermo.py beside the executable first, then the CWD,
-         * so `WFC_PYTHON=... wfc --solver thermo` works from anywhere */
-        const char *sep = strrchr(g_argv0, '/');
-        if (sep) {
-            snprintf(py, sizeof py, "%.*s/wfc_thermo.py", (int)(sep - g_argv0), g_argv0);
-            if (access(py, R_OK) != 0) snprintf(py, sizeof py, "wfc_thermo.py");
-        } else snprintf(py, sizeof py, "wfc_thermo.py");
-    }
-    char local_python[512];
-    const char *pys = getenv("WFC_PYTHON");
-    if (!pys) {
-        const char *sep = strrchr(g_argv0, '/');
-        if (sep) {
-            int n = snprintf(local_python, sizeof local_python,
-                             "%.*s/.venv-thermo/bin/python", (int)(sep - g_argv0), g_argv0);
-            if (n >= 0 && (size_t)n < sizeof local_python && access(local_python, X_OK) == 0)
-                pys = local_python;
+    bool reuse = thermo_in_ && thermo_fp_ && thermo_pid_ > 0;
+    thermo_warm_ = reuse;
+    if (!reuse) {
+        char py[512];
+        const char *pyp = getenv("WFC_THERMO_PY");
+        if (pyp) snprintf(py, sizeof py, "%s", pyp);
+        else {
+            /* find wfc_thermo.py beside the executable first, then the CWD,
+             * so `WFC_PYTHON=... wfc --solver thermo` works from anywhere */
+            const char *sep = strrchr(g_argv0, '/');
+            if (sep) {
+                snprintf(py, sizeof py, "%.*s/wfc_thermo.py", (int)(sep - g_argv0), g_argv0);
+                if (access(py, R_OK) != 0) snprintf(py, sizeof py, "wfc_thermo.py");
+            } else snprintf(py, sizeof py, "wfc_thermo.py");
         }
-        if (!pys && access(".venv-thermo/bin/python", X_OK) == 0)
-            pys = ".venv-thermo/bin/python";
-        if (!pys) pys = "python3";
-    }
-    int in_pipe[2] = {-1, -1}, out_pipe[2] = {-1, -1};
-    if (pipe(in_pipe) != 0) return false;
-    if (pipe(out_pipe) != 0) {
-        close(in_pipe[0]); close(in_pipe[1]);
-        return false;
-    }
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(in_pipe[0]); close(in_pipe[1]);
-        close(out_pipe[0]); close(out_pipe[1]);
-        return false;
-    }
-    if (pid == 0) {
-        close(in_pipe[1]);
-        close(out_pipe[0]);
-        dup2(in_pipe[0], STDIN_FILENO);
-        dup2(out_pipe[1], STDOUT_FILENO);
+        char local_python[512];
+        const char *pys = getenv("WFC_PYTHON");
+        if (!pys) {
+            const char *sep = strrchr(g_argv0, '/');
+            if (sep) {
+                int n = snprintf(local_python, sizeof local_python,
+                                 "%.*s/.venv-thermo/bin/python", (int)(sep - g_argv0), g_argv0);
+                if (n >= 0 && (size_t)n < sizeof local_python && access(local_python, X_OK) == 0)
+                    pys = local_python;
+            }
+            if (!pys && access(".venv-thermo/bin/python", X_OK) == 0)
+                pys = ".venv-thermo/bin/python";
+            if (!pys) pys = "python3";
+        }
+        int in_pipe[2] = {-1, -1}, out_pipe[2] = {-1, -1};
+        if (pipe(in_pipe) != 0) return false;
+        if (pipe(out_pipe) != 0) {
+            close(in_pipe[0]); close(in_pipe[1]);
+            return false;
+        }
+        pid_t pid = fork();
+        if (pid < 0) {
+            close(in_pipe[0]); close(in_pipe[1]);
+            close(out_pipe[0]); close(out_pipe[1]);
+            return false;
+        }
+        if (pid == 0) {
+            close(in_pipe[1]);
+            close(out_pipe[0]);
+            dup2(in_pipe[0], STDIN_FILENO);
+            dup2(out_pipe[1], STDOUT_FILENO);
+            close(in_pipe[0]);
+            close(out_pipe[1]);
+            /* silence jax/absl spam; keep our own stderr */
+            int err_flags = O_WRONLY | O_CREAT | O_TRUNC;
+#ifdef O_NOFOLLOW
+            err_flags |= O_NOFOLLOW;
+#endif
+            int dfd = open("/tmp/wfc_thermo_err.log", err_flags, 0600);
+            if (dfd >= 0) {
+                (void)fchmod(dfd, 0600);
+                if (dfd != STDERR_FILENO) {
+                    (void)dup2(dfd, STDERR_FILENO);
+                    close(dfd);
+                }
+            }
+            execlp(pys, pys, py, (char *)NULL);
+            /* if the interpreter itself is missing, try `uv run python` auto-env */
+            if (!getenv("WFC_THERMO_PY"))
+                execlp("uv", "uv", "run", "--quiet", py, (char *)NULL);
+            _exit(127);
+        }
         close(in_pipe[0]);
         close(out_pipe[1]);
-        /* silence jax/absl spam; keep our own stderr */
-        int err_flags = O_WRONLY | O_CREAT | O_TRUNC;
-#ifdef O_NOFOLLOW
-        err_flags |= O_NOFOLLOW;
-#endif
-        int dfd = open("/tmp/wfc_thermo_err.log", err_flags, 0600);
-        if (dfd >= 0) {
-            (void)fchmod(dfd, 0600);
-            if (dfd != STDERR_FILENO) {
-                (void)dup2(dfd, STDERR_FILENO);
-                close(dfd);
-            }
+        thermo_in_fd_ = in_pipe[1];
+        thermo_fd_ = out_pipe[0];
+        thermo_in_ = fdopen(thermo_in_fd_, "w");
+        if (!thermo_in_) {
+            close(thermo_in_fd_); thermo_in_fd_ = -1;
+            close(thermo_fd_); thermo_fd_ = -1;
+            kill(pid, SIGKILL); waitpid(pid, NULL, 0);
+            return false;
         }
-        execlp(pys, pys, py, (char *)NULL);
-        /* if the interpreter itself is missing, try `uv run python` auto-env */
-        if (!getenv("WFC_THERMO_PY"))
-            execlp("uv", "uv", "run", "--quiet", py, (char *)NULL);
-        _exit(127);
+        /* non-blocking: the C loop keeps rendering while the anneal cools */
+        int fl = fcntl(thermo_fd_, F_GETFL, 0);
+        fcntl(thermo_fd_, F_SETFL, fl | O_NONBLOCK);
+        thermo_fp_ = fdopen(thermo_fd_, "r");
+        if (!thermo_fp_) { /* child is running with nobody to read it */
+            kill(pid, SIGKILL);
+            waitpid(pid, NULL, 0);
+            fclose(thermo_in_); thermo_in_ = NULL; thermo_in_fd_ = -1;
+            close(thermo_fd_);
+            thermo_fd_ = -1;
+            return false;
+        }
+        thermo_pid_ = (int)pid;
     }
-    close(in_pipe[0]);
-    close(out_pipe[1]);
-    thermo_in_fd_ = in_pipe[1];
-    thermo_fd_ = out_pipe[0];
-    thermo_in_ = fdopen(thermo_in_fd_, "w");
-    if (!thermo_in_) {
-        close(thermo_in_fd_); thermo_in_fd_ = -1;
-        close(thermo_fd_); thermo_fd_ = -1;
-        kill(pid, SIGKILL); waitpid(pid, NULL, 0);
-        return false;
-    }
-    /* non-blocking: the C loop keeps rendering while the anneal cools */
-    int fl = fcntl(thermo_fd_, F_GETFL, 0);
-    fcntl(thermo_fd_, F_SETFL, fl | O_NONBLOCK);
-    thermo_fp_ = fdopen(thermo_fd_, "r");
-    if (!thermo_fp_) { /* child is running with nobody to read it */
-        kill(pid, SIGKILL);
-        waitpid(pid, NULL, 0);
-        fclose(thermo_in_); thermo_in_ = NULL; thermo_in_fd_ = -1;
-        close(thermo_fd_);
-        thermo_fd_ = -1;
-        return false;
-    }
-    thermo_pid_ = (int)pid;
     thermo_t0_ = now_ms();
     thermo_inflight_ = true;
     thermo_ready_ = false;
@@ -709,7 +715,12 @@ static int thermo_poll(void) {
                             goto thermo_fail;
                         }
                         if (thermo_valid_) {
-                            thermo_kill();
+                            /* Keep the JSONL process alive. The next map sends
+                             * another init frame through the same pipe, so
+                             * JAX imports and the learned session stay warm. */
+                            thermo_inflight_ = false;
+                            thermo_waiting_sample_ = false;
+                            thermo_waiting_feedback_ = false;
                             g_decided = W_ * H_;
                             set_note("thermo %s \xe2\x80\x94 %d pbits of Z1-class spins",
                                      g_thermo_form, thermo_pbits_);
@@ -819,6 +830,21 @@ static void render_status(int vh, int ch) {
         snprintf(core, sizeof core, "%s %3d%% [%s] | classic P%d [%dx%d]%s",
                  mode, pct, progress, studio_pin_count_, W_, H_, fit);
     }
+    {
+        char context[128], replay[32], brush[32];
+        int replay_pos = g_replay_pos < 0 ? g_replay_len : g_replay_pos + 1;
+        if (g_replay_len > 0)
+            snprintf(replay, sizeof replay, " replay %d/%d", replay_pos, g_replay_len);
+        else replay[0] = 0;
+        if (g_brush_enabled)
+            snprintf(brush, sizeof brush, " brush#%d", g_brush_tile + 1);
+        else brush[0] = 0;
+        snprintf(context, sizeof context, "%s%s%s%s",
+                 g_director ? " DIRECTOR" : "", thermo_warm_ ? " warm" : "",
+                 brush, replay);
+        size_t used = strlen(core);
+        if (used < sizeof core) snprintf(core + used, sizeof core - used, "%s", context);
+    }
     if (now_ms() < g_note_until && g_note[0])
         snprintf(line, sizeof line, "%s | %s", core, g_note);
     else
@@ -846,10 +872,10 @@ static bool save_report(const char *path) {
     if (!f) return false;
     fprintf(f, "{\"schema\":2,\"mode\":\"%s\",\"seed\":%llu,"
                "\"dimensions\":{\"w\":%d,\"h\":%d},\"solver\":\"%s\","
-               "\"backend\":",
+               "\"backend\":\"%s\",\"signature\":\"%016llx\"",
             mode_name(), (unsigned long long)g_seed, W_, H_,
-            g_thermo ? "thermo" : "classic");
-    thermo_json_string(f, thermo_backend_name());
+            g_thermo ? "thermo" : "classic", thermo_backend_name(),
+            (unsigned long long)world_state_hash());
     fputs(",\"quality\":", f);
     quality_json(f, q);
     fprintf(f, ",\"thermo\":{\"enabled\":%s,\"sampler\":",
@@ -862,12 +888,14 @@ static bool save_report(const char *path) {
                "\"contradictions\":%ld,"
                "\"bad\":%ld,\"beta\":%.9g,\"confidence\":%.9g,"
                "\"energy_valid\":%s,\"energy\":%.9g},"
-               "\"studio\":{\"pins\":%d},\"macro\":{\"name\":",
+               "\"studio\":{\"pins\":%d,\"director\":%s,\"brush\":%s},"
+               "\"macro\":{\"name\":",
             thermo_round_, thermo_observations_, thermo_proposals_,
             thermo_accepts_, thermo_rejects_, thermo_displaced_,
             thermo_contradictions_, thermo_bad_, thermo_beta_,
             thermo_confidence_, thermo_energy_valid_ ? "true" : "false",
-            thermo_energy_, studio_pin_count_);
+            thermo_energy_, studio_pin_count_, g_director ? "true" : "false",
+            g_brush_enabled ? "true" : "false");
     thermo_json_string(f, macro_name());
     fprintf(f, ",\"guided_cells\":%d},\"evolution\":{\"candidates\":%d,"
                "\"winner_seed\":%llu,\"scores\":[",

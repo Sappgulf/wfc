@@ -189,6 +189,12 @@ static char g_session_dir[512] = {0};
 static bool g_session_dir_explicit = false;
 static bool g_session_favorite = false;
 static char g_session_annotation[WFC_SESSION_NAME_CAP] = {0};
+static bool g_director = false;
+static bool g_open_requested = false;
+static bool g_brush_enabled = false;
+static int g_brush_tile = 0;
+static bool g_compare_set = false;
+static uint64_t g_compare_seed = 0;
 static int g_zoom = 1;
 static int g_evolve_count = 0;
 static bool g_heatmap = false;
@@ -201,6 +207,7 @@ static double g_evolution_scores[EVOLUTION_MAX];
 static uint64_t g_evolution_winner_seed = 0;
 static int g_fit_w = 80, g_fit_h = 24;   /* terminal viewport in cells */
 static int g_vx = 0, g_vy = 0;
+static int g_replay_len = 0, g_replay_pos = -1; /* -1 = live */
 static double now_ms(void);
 static void quality_trace_clear(void);
 static void thermo_json_string(FILE *f, const char *s);
@@ -715,6 +722,8 @@ static void setup_mode(int idx) {
     g_torus = spec->torus;
     g_smooth = spec->smooth_render;
     g_hero_on = false;
+    g_brush_enabled = false;
+    if (g_brush_tile >= ntiles_) g_brush_tile = 0;
     apply_bias();
     if (g_is_tty) set_title(spec->name);
 }
@@ -731,6 +740,36 @@ static void set_title(const char *mode) {
 /* ---------------- wfc core ---------------- */
 static uint64_t *dom_;
 static int *stk_;
+
+/* Stable identity for a solved artifact. It intentionally includes the
+ * semantic grid and authored pins, not renderer animation state, so the same
+ * mode/seed/constraints produces the same shareable signature. */
+static uint64_t world_state_hash(void) {
+    uint64_t hash = UINT64_C(1469598103934665603);
+    const unsigned char *mode = (const unsigned char *)mode_name();
+    for (const unsigned char *p = mode; p && *p; p++) {
+        hash ^= *p;
+        hash *= UINT64_C(1099511628211);
+    }
+    uint64_t header[3] = {(uint64_t)W_, (uint64_t)H_, g_seed};
+    for (size_t i = 0; i < sizeof header; i++) {
+        hash ^= ((const unsigned char *)header)[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    size_t cells = W_ > 0 && H_ > 0 ? (size_t)W_ * H_ : 0;
+    for (size_t i = 0; i < cells; i++) {
+        uint64_t value = dom_ ? dom_[i] : 0;
+        for (size_t b = 0; b < sizeof value; b++) {
+            hash ^= ((const unsigned char *)&value)[b];
+            hash *= UINT64_C(1099511628211);
+        }
+        unsigned char pin = studio_pin_ ? studio_pin_[i] : 0;
+        unsigned char tile = studio_tile_ ? studio_tile_[i] : 0;
+        hash ^= pin; hash *= UINT64_C(1099511628211);
+        hash ^= tile; hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
 
 static int *comp_;           /* circuit only: connected-trace component id */
 static RGB *comp_col_;

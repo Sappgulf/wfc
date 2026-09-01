@@ -21,6 +21,7 @@ static int hist_len_ = 0, hist_pos_ = -1;  /* -1 = live */
 static void hist_clear(void) {
     for (int i = 0; i < HIST_N; i++) { free(hist_bufs_[i]); hist_bufs_[i] = NULL; }
     hist_len_ = 0; hist_pos_ = -1; hist_cnt_ = 0;
+    g_replay_len = 0; g_replay_pos = -1;
 }
 static void hist_push(void) {
     if (hist_pos_ >= 0) { /* scrubbing: discard the future and fork from there */
@@ -32,6 +33,7 @@ static void hist_push(void) {
         memmove(&hist_bufs_[0], &hist_bufs_[1], (size_t)(HIST_N - 1) * sizeof(uint64_t *));
         hist_bufs_[HIST_N - 1] = drop;
         memcpy(drop, dom_, sizeof(uint64_t) * (size_t)W_ * H_);
+        g_replay_len = HIST_N;
     } else {
         if (!hist_bufs_[hist_len_]) {
             hist_bufs_[hist_len_] = malloc(sizeof(uint64_t) * (size_t)W_ * H_);
@@ -42,7 +44,9 @@ static void hist_push(void) {
         }
         memcpy(hist_bufs_[hist_len_], dom_, sizeof(uint64_t) * (size_t)W_ * H_);
         hist_len_++;
+        g_replay_len = hist_len_;
     }
+    g_replay_pos = -1;
 }
 static bool hist_back(void) {
     if (hist_pos_ == -1) {
@@ -51,12 +55,14 @@ static bool hist_back(void) {
     } else if (hist_pos_ > 0) hist_pos_--;
     else return false;
     memcpy(dom_, hist_bufs_[hist_pos_], sizeof(uint64_t) * (size_t)W_ * H_);
+    g_replay_pos = hist_pos_;
     return true;
 }
 static bool hist_fwd(void) {
     if (hist_pos_ < 0 || hist_pos_ >= hist_len_ - 1) return false;
     hist_pos_++;
     memcpy(dom_, hist_bufs_[hist_pos_], sizeof(uint64_t) * (size_t)W_ * H_);
+    g_replay_pos = hist_pos_;
     return true;
 }
 
@@ -583,6 +589,38 @@ static void studio_pin_hover(void) {
     else
         set_note(was_pinned ? "unpin refused" : "pin refused there");
 }
+
+/* A brush is a deliberate, repeatable sculpting choice. It still goes
+ * through the same transactional propagation path as a mouse seed, so an
+ * incompatible stroke is refused rather than corrupting the world. */
+static void brush_cycle(int step) {
+    if (!g_brush_enabled || ntiles_ <= 0) return;
+    g_brush_tile = (g_brush_tile + step) % ntiles_;
+    if (g_brush_tile < 0) g_brush_tile += ntiles_;
+    set_note("brush tile %d/%d", g_brush_tile + 1, ntiles_);
+}
+static void brush_toggle(void) {
+    if (g_brush_enabled) {
+        g_brush_enabled = false;
+        set_note("brush off");
+        return;
+    }
+    if (g_hover_x >= 0 && g_hover_y >= 0 && g_hover_x < W_ && g_hover_y < H_) {
+        uint64_t domain = dom_[IDX(g_hover_x, g_hover_y)];
+        if (pc64(domain) == 1) g_brush_tile = __builtin_ctzll(domain);
+    }
+    g_brush_enabled = true;
+    set_note("brush on tile %d/%d — [ ] changes tile", g_brush_tile + 1, ntiles_);
+}
+static void director_toggle(void) {
+    g_director = !g_director;
+    g_cycle = g_director;
+    g_zen = g_director;
+    g_pan = g_director;
+    if (g_director) g_sound = true;
+    else ambient_stop();
+    set_note("director %s — cycle, morph, pan, audio", g_director ? "ON" : "off");
+}
 static int mouse_esc = 0;      /* 0 normal, 1 got ESC, 2 got '[' */
 static char mouse_buf[32];
 static int mouse_len = 0;
@@ -635,7 +673,12 @@ static void handle_click(int btn, int px, int py) {
     /* left-click: force collapse */
     if (pc64(dom_[cell]) <= 1) return;
     if (!undo_push()) { set_note("undo unavailable"); return; }
-    dom_[cell] = 1ULL << weighted_pick_at(dom_[cell], cell);
+    int tile = g_brush_enabled ? g_brush_tile : weighted_pick_at(dom_[cell], cell);
+    if (tile < 0 || tile >= ntiles_ || !(dom_[cell] & (1ULL << tile))) {
+        set_note("brush tile not allowed there");
+        return;
+    }
+    dom_[cell] = 1ULL << tile;
     if (propagate_from(cell)) { set_note("seeded (%d,%d)", cx, cy); if (g_sound) { ensure_sfx(); play_sfx(SFX_BLIP); } }
     else {
         undo_pop();
@@ -967,6 +1010,7 @@ static int execute_palette_command(WfcCommandId id) {
         g_sound = !g_sound; set_note("audio %s", g_sound ? "ON" : "off");
         if (!g_sound) ambient_stop(); return 0;
     case WFC_COMMAND_FULLSCREEN: toggle_fullscreen_fit(); return 1;
+    case WFC_COMMAND_DIRECTOR: director_toggle(); return 1;
     case WFC_COMMAND_QUIT: return 2;
     case WFC_COMMAND_COUNT: break;
     }
@@ -1294,6 +1338,19 @@ static int pump_keys(bool tty) {
             }
             continue;
         }
+        if (key == KEY_LEFT || key == KEY_RIGHT) {
+            if (g_nworlds > 1) {
+                set_note("replay: single-world only");
+            } else if (key == KEY_LEFT && hist_back()) {
+                g_paused = true;
+                set_note("replay %d/%d — right arrow returns", g_replay_pos + 1, g_replay_len);
+            } else if (key == KEY_RIGHT && hist_fwd()) {
+                set_note("replay %d/%d", g_replay_pos + 1, g_replay_len);
+            } else {
+                set_note(key == KEY_LEFT ? "replay at beginning" : "replay is live");
+            }
+            continue;
+        }
         if (c == '/' || c == 'M') {
             /* the picker is easier than reaching every world with `m` */
             g_picker_was_paused = g_paused;
@@ -1468,6 +1525,10 @@ static int pump_keys(bool tty) {
             full_repaint_ = true;
         }
         else if (c == '[' || c == ']') {
+            if (g_brush_enabled) {
+                brush_cycle(c == ']' ? 1 : -1);
+                continue;
+            }
             g_bias += (c == ']' ? 0.08 : -0.08);
             if (g_bias < 0.04) g_bias = 0.04;
             if (g_bias > 0.96) g_bias = 0.96;
@@ -1478,6 +1539,8 @@ static int pump_keys(bool tty) {
             g_cycle = !g_cycle;
             set_note("auto-cycle %s", g_cycle ? "ON" : "off");
         }
+        else if (c == 't') brush_toggle();
+        else if (c == 'D') { director_toggle(); req = 1; }
         else if (c == 'n') {
             g_zen = !g_zen;
             if (!g_zen) g_ghost_t0 = 0;
