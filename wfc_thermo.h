@@ -28,6 +28,7 @@
  *      WFC_THERMO_PY -> path to wfc_thermo.py (default ./wfc_thermo.py)
  */
 static bool g_thermo = false;
+static bool g_thermo_accelerated = false;
 static char g_thermo_form[8] = "potts";
 static bool g_thermo_learn = true;
 static char g_thermo_profile[512] = "";
@@ -68,6 +69,7 @@ static size_t thermo_try_cap_ = 0;
 static long thermo_stall_rounds_ = 0;
 static bool thermo_last_progress_ = false;
 static bool thermo_stalled_ = false;
+static bool thermo_fallback_ = false;
 #define THERMO_STALL_LIMIT 32
 
 /* the reader's partial-line buffer; a kill has to clear it, see below */
@@ -99,6 +101,7 @@ static void thermo_kill(void) {
 }
 
 static const char *thermo_backend_name(void) {
+    if (thermo_fallback_) return "classic-fallback";
     if (!g_thermo) return "classic";
     if (!strcmp(thermo_sampler_, "python")) return "python-bounded";
     if (!strcmp(thermo_sampler_, "thrml")) return "thrml-jax";
@@ -138,8 +141,20 @@ static bool thermo_launch(void) {
             if (access(py, R_OK) != 0) snprintf(py, sizeof py, "wfc_thermo.py");
         } else snprintf(py, sizeof py, "wfc_thermo.py");
     }
+    char local_python[512];
     const char *pys = getenv("WFC_PYTHON");
-    if (!pys) pys = "python3"; /* users with thrml in a venv: WFC_PYTHON=/path/venv/bin/python */
+    if (!pys) {
+        const char *sep = strrchr(g_argv0, '/');
+        if (sep) {
+            int n = snprintf(local_python, sizeof local_python,
+                             "%.*s/.venv-thermo/bin/python", (int)(sep - g_argv0), g_argv0);
+            if (n >= 0 && (size_t)n < sizeof local_python && access(local_python, X_OK) == 0)
+                pys = local_python;
+        }
+        if (!pys && access(".venv-thermo/bin/python", X_OK) == 0)
+            pys = ".venv-thermo/bin/python";
+        if (!pys) pys = "python3";
+    }
     int in_pipe[2] = {-1, -1}, out_pipe[2] = {-1, -1};
     if (pipe(in_pipe) != 0) return false;
     if (pipe(out_pipe) != 0) {
@@ -209,6 +224,7 @@ static bool thermo_launch(void) {
     thermo_waiting_feedback_ = false;
     thermo_reset_pending_ = g_thermo_reset_learning;
     thermo_failed_ = false;
+    thermo_fallback_ = false;
     g_thermo_reset_learning = false;
     thermo_launches_++;
     thermo_valid_ = false; /* a fresh run must earn its own result */
@@ -235,10 +251,12 @@ static bool thermo_launch(void) {
     QualityProfile profile = quality_profile();
     fprintf(thermo_in_, ",\"w\":%d,\"h\":%d,\"ntiles\":%d,\"seed\":%llu,"
                      "\"torus\":%s,\"smooth\":%s,\"form\":\"%s\",\"learn\":%s,"
+                     "\"accelerated\":%s,"
                      "\"quality_focus\":",
             W_, H_, ntiles_, (unsigned long long)g_seed,
             g_torus ? "true" : "false", g_smooth ? "true" : "false", g_thermo_form,
-            g_thermo_learn ? "true" : "false");
+            g_thermo_learn ? "true" : "false",
+            g_thermo_accelerated ? "true" : "false");
     thermo_json_string(thermo_in_, profile.focus);
     fputs(",\"quality_weights\":{", thermo_in_);
     fprintf(thermo_in_, "\"validity\":%.9g,\"boundary\":%.9g,\"coverage\":%.9g,"
@@ -716,6 +734,7 @@ static int thermo_poll(void) {
 thermo_fail:
     stalled = thermo_stalled_;
     thermo_failed_ = true;
+    thermo_fallback_ = true;
     thermo_kill();
     if (stalled) {
         set_note("thermo stalled \xe2\x80\x94 classic solver");
@@ -822,8 +841,8 @@ static bool save_report(const char *path) {
     if (!path || !*path) return false;
     QualityMetrics q = quality_measure(true);
     quality_record(q);
-    char temp[ARTIFACT_TEMP_CAP];
-    FILE *f = artifact_open(path, temp, sizeof temp);
+    char temp[WFC_ARTIFACT_TEMP_CAP];
+    FILE *f = wfc_artifact_open(path, temp, sizeof temp);
     if (!f) return false;
     fprintf(f, "{\"schema\":2,\"mode\":\"%s\",\"seed\":%llu,"
                "\"dimensions\":{\"w\":%d,\"h\":%d},\"solver\":\"%s\","
@@ -858,8 +877,8 @@ static bool save_report(const char *path) {
         fprintf(f, "%s%.9g", i ? "," : "", quality_clamp(g_evolution_scores[i]));
     fputs("]}}\n", f);
     bool ok = ferror(f) == 0;
-    if (ok) ok = artifact_commit(f, temp, path);
-    else artifact_abort(f, temp);
+    if (ok) ok = wfc_artifact_commit(f, temp, path);
+    else wfc_artifact_abort(f, temp);
     if (!ok) return false;
     return true;
 }

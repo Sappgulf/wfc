@@ -62,6 +62,10 @@ Picker queries also understand `#favorite` and `#recent`; press `f` while the
 picker is open to filter normally, or press `F` to toggle the highlighted world
 as a favorite.
 
+Press `:` for the command palette: type a command or description, use arrows,
+and press enter to run it. Press `B` for the session browser to resume,
+favorite, rename, or safely delete snapshots.
+
 ## Keys
 
 `/` pick a world (type to filter) · `space` new · `m` next world · `y` theme ·
@@ -74,6 +78,7 @@ as a favorite.
 `l` quality observatory · `P` pin/unpin the hovered cell ·
 `Q` quality heatmap · `E` Evolution Lab (rank seed variants) · `x` repair hotspot ·
 `F` fit the live terminal viewport ·
+`:` command palette · `B` session browser ·
 `Y` red/green colour assist · `w a s d` hero crawl
 through solved dungeons (light all the torches; `a` moves left there) · `h` help · `q` quit
 
@@ -101,6 +106,7 @@ into green. The blue shift separates them by 55% instead.
 --report out.json       quality, thermo, and studio observatory report
 --world-file out.bin    W/L interactive world snapshot path (default /tmp/wfc_world.bin)
 --session out.bin       W/L snapshot plus a `.meta` sidecar for studio settings
+--session-dir DIR       snapshot directory; W saves `current.wfc`, B browses it
 --inspect-world FILE    validate a WFC1 snapshot and print metadata JSON
 --gallery out.html  all-mode web showcase
 --collage out.png    mosaic of all worlds
@@ -111,7 +117,7 @@ into green. The blue shift separates them by 55% instead.
 --pan        camera drift
 --daycycle   terrain dawn/dusk
 --sound      synth sfx + per-world ambient drones
---solver     classic | thermo[=potts|ising]
+--solver     classic | thermo[=potts|ising] | thermo-accelerated
 --no-learn   disable persistent thermo preferences
 --thermo-profile DIR  store thermo profiles in DIR
 --reset-learning     clear the active thermo profile before sampling
@@ -147,6 +153,10 @@ snapshot is rejected too.
 With `--session FILE`, `W` and `L` also preserve theme, speed, quality bias,
 CRT/zen/colorblind settings, camera pan, heatmap, and entropy state in
 `FILE.meta`. Favorites and recent modes are persisted in the normal config.
+With `--session-dir DIR`, `W` saves `DIR/current.wfc` and its metadata sidecar;
+`B` opens every snapshot in that directory. The browser sorts favorites first,
+then newest files, and supports Enter to resume, `F` to favorite, `r` to rename,
+and a confirming `dd` to delete.
 In the observatory, `x` runs a bounded repair pass for the current hotspot while
 preserving pinned cells.
 
@@ -297,17 +307,20 @@ PNG, BMP, GIF, gallery, collage, and JSON report artifacts are staged beside
 their destination and atomically published, so interrupted writes cannot leave
 half an artifact (or accidentally overwrite a symlink target).
 
-THRML/JAX is optional. If installed, the legacy one-shot compatibility API can
-use it; the persistent worker deliberately uses its dependency-free bounded
-sampler, so
-`--solver thermo` remains usable without a Python package install. To enable
-the accelerated sampler, install `thrml` and `jax` (see [thrml docs](https://docs.thrml.ai)),
-then either run `wfc` from the repo root (it finds `wfc_thermo.py` there), or
-point at your venv:
+THRML/JAX is optional. `--solver thermo` uses the dependency-free bounded
+worker and remains usable without a Python package install. To request the
+accelerated sampler, install `thrml` and `jax` (see [thrml docs](https://docs.thrml.ai))
+and select `--solver thermo-accelerated`:
 
 ```sh
-WFC_PYTHON=/path/to/venv/bin/python ./wfc --solver thermo
+WFC_PYTHON=/path/to/venv/bin/python ./wfc --solver thermo-accelerated
 ```
+
+When launched from the repository, the binary automatically prefers
+`.venv-thermo/bin/python`; `--report` records `thrml-jax` when the annealer ran
+and `classic-fallback` when the runtime or a problem-specific anneal failed.
+The fallback remains a valid bounded solve, and the worker handshake exposes
+the requested and actual sampler separately.
 
 The current reproducible optional environment is captured in
 `requirements-thermo.lock`; `make thermo-env` creates `.venv-thermo` and
@@ -332,8 +345,8 @@ Albedo comes from the active mode's palette (ray-traced fires, nebulae, seas).
 ## Benchmark lab
 
 `make quality-benchmark` runs a bounded comparison across streets, neurons,
-mycelium, delta, and rail using classic, thermo-ephemeral (`--no-learn`), and
-thermo-learned (isolated temporary profile) paths. It prints solve success,
+mycelium, delta, and rail using classic, thermo-ephemeral (`--no-learn`),
+thermo-learned (isolated temporary profile), and thermo-accelerated paths. It prints solve success,
 weighted quality, and milliseconds, followed by one JSON line suitable for
 automation. For a deeper local experiment, run
 `python3 tests/quality_benchmark.py --binary ./wfc --trials 2 --w 8 --h 6`.
@@ -346,8 +359,9 @@ its floor, and p95 latency must stay below its SLO. To keep a local trend
 artifact and compare a later run, use `--save-current FILE` and then
 `--baseline FILE`; the gate allows a bounded latency increase and quality drop.
 `--gallery FILE.html` now emits filterable cards with mode, focus, quality, seed,
-and hotspot metadata; open the file in any browser and sort by quality when
-comparing a run.
+annotations, hotspot metadata, and replay links. Select cards and use
+“compare selected” to see the quality range and delta before opening a
+`wfc://mode/seed` replay link.
 
 ## Test discipline
 
@@ -377,23 +391,26 @@ the full gate.
   reports relative p95/quality regressions for a local trend
 - `make sweep` runs every mode against every render toggle under ASan+UBSan
 - `make interactive-check` drives the live TUI through a pty: picker, keys,
-  escape sequences, help, quit
+  escape sequences, help, palette, sessions, quit
 - `make interactive-asan-check` repeats those pty paths under ASan
 - `make thermo-check` drives the sidecar protocol across every registry mode
 - `make fuzz` replays the same 50 ASan cases from its printed seed
 - `make graphics-smoke` verifies a real inline-image frame through a pty
 - `make audio-smoke` verifies WAV generation and the configured player boundary
 - `make doctor` prints machine-readable capability information with `--json`
+- `make visual-regression` checks deterministic 8x6 render hashes for every mode
+- `make macos-bundle` builds `dist/WFC.app`; `make macos-tarball` packages it
 - `make check-fast` is suitable for every edit; `make check-full` is the release gate
 
 ~9,000 lines of C, ~1,600 lines of Python. `make` builds the application; the
-direct equivalent is `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c wfc_mode.c wfc_platform.c wfc_quality.c wfc_solver.c -lz`.
+direct equivalent is `cc -O2 -std=c11 -o wfc wfc.c wfc_artifact.c wfc_commands.c wfc_core.c wfc_mode.c wfc_platform.c wfc_quality.c wfc_session.c wfc_solver.c -lz`.
 
 The world/render/export/UI header parts are still included in one application
 translation unit for now, preserving their existing compiler-order contracts.
-The stable seams around that core are independently compiled: mode identity and
-registry validation, platform I/O, quality scoring, generic propagation, and
-domain primitives each have a narrow dependency-free test surface.
+The stable seams around that core are independently compiled: artifact
+publication, command matching, session storage, mode identity and registry
+validation, platform I/O, quality scoring, generic propagation, and domain
+primitives each have a narrow dependency-free test surface.
 
 | part           | what lives there                                        |
 |----------------|---------------------------------------------------------|
@@ -402,6 +419,9 @@ domain primitives each have a narrow dependency-free test surface.
 | `wfc_platform.c/.h`| clock, sleep, and input seams for tests/hosts        |
 | `wfc_quality.c/.h`| quality profiles, clamps, and weighted scoring       |
 | `wfc_solver.c/.h`| generic compatibility propagation                      |
+| `wfc_artifact.c/.h`| atomic destination publication and temp cleanup       |
+| `wfc_commands.c/.h`| command palette catalog and filtering                  |
+| `wfc_session.c/.h`| snapshot scan, metadata, favorite, rename, delete     |
 | `wfc.c`        | includes, the part list, argument parsing, `main`        |
 | `wfc_world.h`  | mode registry, rng, tiles, solver, rivers, quality       |
 | `wfc_render.h` | palettes, framebuffer, every world's render, raymarcher  |
@@ -410,6 +430,6 @@ domain primitives each have a narrow dependency-free test surface.
 | `wfc_thermo.h` | sidecar protocol, counterfactual guard, learned profiles |
 | `wfc_ui.h`     | time travel, crawler, keys, picker, observatory          |
 
-The header parts are still included in their compiler order, while the five
+The header parts are still included in their compiler order, while the eight
 small `.c` modules above compile independently and have no terminal/render
 dependencies.

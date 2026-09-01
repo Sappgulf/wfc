@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "../wfc_mode.h"
+#include "../wfc_commands.h"
 #include "../wfc_platform.h"
 #include "../wfc_quality.h"
 #include "../wfc_solver.h"
@@ -35,6 +36,11 @@ static ssize_t fake_read(void *context, int fd, void *buffer, size_t count) {
 }
 
 int main(void) {
+    assert(wfc_command_count() >= 10);
+    const WfcCommand *sessions = wfc_command_at(WFC_COMMAND_SESSIONS);
+    assert(sessions && wfc_command_matches(sessions, "rename"));
+    assert(!wfc_command_matches(sessions, "not-a-command"));
+
     assert(WFC_MODE_COUNT == 37);
     assert(wfc_mode_id_from_name("rail") == WFC_MODE_RAIL);
     assert(strcmp(wfc_mode_name(WFC_MODE_DELTA), "delta") == 0);

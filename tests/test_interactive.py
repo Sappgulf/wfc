@@ -14,6 +14,7 @@ import signal
 import struct
 import sys
 import termios
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -174,6 +175,53 @@ class InteractiveTests(unittest.TestCase):
         stream = plain(filtered)
         self.assertIn("1/37 worlds", stream)
         self.assertIn("circuit", stream)
+
+    def test_command_palette_filters_and_opens_session_browser(self):
+        self.session = Session()
+        opened = self.session.send_until(
+            b":", lambda o: "COMMAND PALETTE" in last_screen(o),
+        )
+        self.assertIn("command:", last_screen(opened))
+        filtered = self.session.send_until(
+            b"sessions",
+            lambda o: "command: sessions" in last_screen(o) and
+            "resume, favorite" in last_screen(o),
+        )
+        self.assertIn("sessions", last_screen(filtered))
+        browser = self.session.send_until(
+            b"\r", lambda o: "SESSION BROWSER" in last_screen(o),
+        )
+        self.assertIn("no snapshots yet", last_screen(browser))
+        returned = self.session.send_until(
+            b"q", lambda o: "SESSION BROWSER" not in last_screen(o),
+        )
+        self.assertNotIn("SESSION BROWSER", last_screen(returned))
+
+    def test_session_browser_saves_favorites_and_resumes_a_snapshot(self):
+        with tempfile.TemporaryDirectory(prefix="wfc-session-") as directory:
+            self.session = Session("--session-dir", directory, "--speed", "20000")
+            saved = self.session.send_until(
+                b"W", lambda o: "session saved" in plain(o), timeout=8,
+            )
+            self.assertIn("session saved", plain(saved))
+            snapshot = Path(directory) / "current.wfc"
+            metadata = Path(directory) / "current.wfc.meta"
+            self.assertTrue(snapshot.exists())
+            self.assertTrue(metadata.exists())
+
+            browser = self.session.send_until(
+                b"B", lambda o: "SESSION BROWSER" in last_screen(o),
+            )
+            self.assertIn("current.wfc", last_screen(browser))
+            favorite = self.session.send_until(
+                b"F", lambda o: "★" in last_screen(o),
+            )
+            self.assertIn("favorite=1", metadata.read_text(encoding="utf-8"))
+            self.assertIn("★", last_screen(favorite))
+            resumed = self.session.send_until(
+                b"\r", lambda o: "resumed current.wfc" in plain(o),
+            )
+            self.assertIn("resumed current.wfc", plain(resumed))
 
     def test_help_explains_the_first_three_interactions(self):
         self.session = Session()

@@ -43,13 +43,15 @@ def stop_child(pid):
         pass
 
 
-def graphics(binary):
+def graphics_case(binary, term_program, kitty=False):
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(ROOT)
         env = os.environ.copy()
         env["HOME"] = tempfile.mkdtemp(prefix="wfc-gfx-home-")
-        env["TERM_PROGRAM"] = "iTerm.app"
+        env["TERM_PROGRAM"] = term_program
+        if kitty:
+            env["KITTY_WINDOW_ID"] = "123"
         os.execve(str(binary), [str(binary), "--mode", "aurora", "--seed", "7",
                                 "--w", "8", "--h", "6", "--once", "--gfx"], env)
     fcntl_size = struct.pack("HHHH", 30, 100, 0, 0)
@@ -69,8 +71,17 @@ def graphics(binary):
     finally:
         stop_child(pid)
         os.close(fd)
-    if b"\x1b]1337;File=inline=1;" not in output:
-        raise AssertionError("graphics protocol frame was not emitted")
+    if kitty:
+        if b"\x1b_Gf=32," not in output:
+            raise AssertionError("Kitty graphics protocol frame was not emitted")
+    elif b"\x1b]1337;File=inline=1;" not in output:
+        raise AssertionError("OSC 1337 graphics protocol frame was not emitted")
+
+
+def graphics(binary):
+    graphics_case(binary, "iTerm.app")
+    graphics_case(binary, "WezTerm")
+    graphics_case(binary, "ghostty", kitty=True)
 
 
 def audio(binary):
@@ -103,7 +114,7 @@ def main():
     binary = Path(args.binary).resolve()
     if args.graphics:
         graphics(binary)
-        print("graphics: inline image protocol OK")
+        print("graphics: OSC 1337 + Kitty inline image protocols OK")
     if args.audio:
         audio(binary)
         print("audio: dispatch and WAV pipeline OK")

@@ -18,10 +18,10 @@ The long-lived protocol is bidirectional:
     finish -> done
     stop -> exit
 
-The sampler is intentionally optional.  If THRML/JAX is installed, the
-one-shot compatibility API below remains available; the persistent worker
-uses its dependency-free bounded proposal engine so incremental learning has
-the same behavior in every environment.
+The sampler is intentionally selectable.  The portable persistent worker
+uses a dependency-free bounded proposal engine by default; an explicit
+``accelerated`` init request uses THRML/JAX for annealed proposals when the
+runtime is installed and reports a truthful fallback otherwise.
 
 WFC is a pairwise Potts/EBM: cells are categorical nodes, cdir masks are
 pairwise compatibility energies, tile weights are unary biases. THRML
@@ -272,6 +272,10 @@ def validate_spec(spec):
     if not isinstance(learn, bool):
         raise ValueError("learn must be boolean")
     spec["learn"] = learn
+    accelerated = spec.get("accelerated", False)
+    if not isinstance(accelerated, bool):
+        raise ValueError("accelerated must be boolean")
+    spec["accelerated"] = accelerated
     profile_dir = spec.get("profile_dir")
     if profile_dir is not None and (not isinstance(profile_dir, str) or len(profile_dir) > 4096):
         raise ValueError("profile_dir must be a path string")
@@ -384,7 +388,13 @@ def _nearest_allowed(mask, band, ntiles):
 
 # ---------------- Potts solve (categorical nodes) ----------------
 
-def potts_solve(spec, emit_meta=True):
+def potts_sample(spec, emit_meta=True):
+    """Run one THRML/JAX anneal and return ``(configuration, bad_edges)``.
+
+    Keeping the sampler separate from protocol emission lets the long-lived
+    worker use the same compiled model for incremental proposals without
+    pretending that every internal sample is a terminal ``done`` event.
+    """
     require_runtime()
     W_, H_, ntiles = spec["w"], spec["h"], spec["ntiles"]
     seed = spec["seed"]
@@ -487,8 +497,7 @@ def potts_solve(spec, emit_meta=True):
             cfg = all_steps[si, c]
             bad = bad_of(cfg)
             if bad == 0:
-                emit({"t": "done", "valid": 1, "cfg": cfg.astype(int).tolist(), "form": "potts"})
-                return cfg
+                return cfg, 0
             if bad < best_bad:
                 best_bad = bad
                 best = cfg
@@ -515,14 +524,19 @@ def potts_solve(spec, emit_meta=True):
                 cfg = cfgs2[si, c]
                 bad = bad_of(cfg)
                 if bad == 0:
-                    emit({"t": "done", "valid": 1, "cfg": cfg.astype(int).tolist(), "form": "potts"})
-                    return cfg
+                    return cfg, 0
                 if bad < best_bad:
                     best_bad = bad
                     best = cfg
 
-    emit({"t": "done", "valid": 0, "bad": int(best_bad),
-          "cfg": best.astype(int).tolist(), "form": "potts"})
+    return best, int(best_bad)
+
+
+def potts_solve(spec, emit_meta=True):
+    cfg, bad = potts_sample(spec, emit_meta=emit_meta)
+    emit({"t": "done", "valid": int(bad == 0), "bad": int(bad),
+          "cfg": cfg.astype(int).tolist(), "form": "potts"})
+    return cfg
 
 
 # ---------------- domain-wall Ising (Z1 p-bit form) ----------------
@@ -661,6 +675,8 @@ class ThermoSession:
         self.beta_scale = 1.0
         self.pending = None
         self.sampler = "python"
+        self.accelerated = False
+        self.accelerated_error = ""
         self.quality_focus = "general"
         self.quality_weights = {}
         self.quality_priors = []
@@ -715,10 +731,12 @@ class ThermoSession:
         self.openness = list(spec["tile_openness"])
         self.macro_name = spec["macro_name"]
         self.macro_guided_cells = spec["macro_guided_cells"]
-        # The persistent path is deliberately the bounded Python proposal
-        # engine.  THRML remains available for the legacy one-shot API, but
-        # claiming it here would misdescribe the incremental worker.
-        self.sampler = "python"
+        requested_accelerated = bool(spec.get("accelerated", False))
+        self.accelerated = requested_accelerated and _RUNTIME_ERROR is None
+        self.accelerated_error = ""
+        self.sampler = "thrml" if self.accelerated else "python"
+        if requested_accelerated and not self.accelerated:
+            self.accelerated_error = "thrml/jax runtime unavailable"
         domain = spec.get("domain")
         pbits = (sum(mask.bit_count() - 1 for mask in domain)
                  if domain is not None else spec["w"] * spec["h"] * (spec["ntiles"] - 1))
@@ -727,6 +745,8 @@ class ThermoSession:
             "t": "ready",
             "schema": 1,
             "sampler": self.sampler,
+            "requested_sampler": "thrml" if requested_accelerated else "python",
+            "fallback": self.accelerated_error or None,
             "quality_focus": self.quality_focus,
             "quality_weights": self.quality_weights,
             "quality_prior_count": len(self.quality_priors),
@@ -908,6 +928,76 @@ class ThermoSession:
         picks.extend(self._extend(domains, picks[0], beta))
         return picks
 
+    def _accelerated_proposal(self, domains, budget, beta):
+        """Use the real THRML/JAX annealer to choose a connected WFC patch.
+
+        C still owns propagation and rollback.  The accelerator only returns
+        candidate singleton assignments, so an invalid or stale proposal can
+        never bypass the hard WFC contract.
+        """
+        try:
+            accelerated_spec = dict(self.spec)
+            accelerated_spec["domains"] = list(domains)
+            accelerated_spec["seed"] = (
+                self.spec["seed"] + self.round * 104729
+            ) & U64_MASK
+            accelerated_spec["steps"] = max(6, min(24, budget * 2))
+            accelerated_spec["chains"] = max(2, min(16, 4 + budget // 4))
+            # Fold learned tile preferences into the annealer's unary draw;
+            # the bounded learner remains the source of truth for updates.
+            bias = self.state.get("tile_bias", []) if self.state else []
+            accelerated_spec["unary"] = [
+                max(1e-6, float(weight) * math.exp(
+                    max(-2.0, min(2.0, float(bias[i]) if i < len(bias) else 0.0)) * 0.25
+                ))
+                for i, weight in enumerate(self.spec["unary"])
+            ]
+            cfg, bad = potts_sample(accelerated_spec, emit_meta=False)
+        except Exception as error:  # noqa: BLE001 - runtime boundary fallback
+            self.accelerated = False
+            self.sampler = "python"
+            self.accelerated_error = str(error)[:240]
+            return self._proposal(domains, budget, beta)
+
+        unresolved = [i for i, mask in enumerate(domains)
+                      if _singleton_tile(mask) < 0]
+        if not unresolved:
+            return None
+        ranked = sorted(
+            unresolved,
+            key=lambda i: (domains[i].bit_count(),
+                           -sum(_singleton_tile(domains[n]) >= 0
+                                for n, _ in self._neighbors(i)), i),
+        )
+        limit = min(16, max(1, budget))
+        confidence = max(0.28, min(0.99, 1.0 / (1.0 + float(bad))))
+        picks = []
+        for index in ranked:
+            tile = int(cfg[index])
+            mask = domains[index]
+            if tile < 0 or not (mask & (1 << tile)):
+                continue
+            # Keep the hard local safety check close to the accelerator
+            # boundary. C will still run full propagation transactionally.
+            options = self._candidate_options(domains, index)
+            allowed = {option[0]: option for option in options}
+            if tile not in allowed:
+                if not options:
+                    continue
+                tile, score, context = options[0]
+            else:
+                _chosen, score, context = allowed[tile]
+            picks.append({
+                "i": index,
+                "tile": tile,
+                "p": round(float(confidence), 6),
+                "score": round(float(score), 6),
+                "context": context,
+            })
+            if len(picks) >= limit:
+                break
+        return picks or None
+
     def _extend(self, domains, first, beta):
         """Grow the proposal outward from the first cell.
 
@@ -1018,7 +1108,8 @@ class ThermoSession:
             raise ValueError("beta_target must be positive and finite")
         beta = max(0.05, min(24.0, beta_target * self.beta_scale))
         self.round += 1
-        proposal = self._proposal(domains, budget, beta)
+        proposal = (self._accelerated_proposal(domains, budget, beta)
+                    if self.accelerated else self._proposal(domains, budget, beta))
         if not proposal:
             raise ValueError("no locally safe proposal; classic solver should take over")
         bad = self._partial_bad(domains)

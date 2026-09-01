@@ -289,10 +289,8 @@ static bool world_save_file(const char *path) {
         pin_count++;
     }
 
-    char temp[sizeof g_world_path + 32];
-    int temp_len = snprintf(temp, sizeof temp, "%s.tmp.%ld", path, (long)getpid());
-    if (temp_len < 0 || (size_t)temp_len >= sizeof temp) return false;
-    FILE *f = fopen(temp, "wb");
+    char temp[WFC_ARTIFACT_TEMP_CAP];
+    FILE *f = wfc_artifact_open(path, temp, sizeof temp);
     if (!f) return false;
 
     uint64_t hash = WORLD_HASH_OFFSET;
@@ -313,13 +311,9 @@ static bool world_save_file(const char *path) {
              world_put_u32(f, studio_tile_[i], &hash);
     }
     if (ok) ok = world_put_u64(f, hash, NULL);
-    if (ok && fflush(f) != 0) ok = false;
-    if (fclose(f) != 0) ok = false;
-    if (!ok || rename(temp, path) != 0) {
-        unlink(temp);
-        return false;
-    }
-    return true;
+    if (ok) return wfc_artifact_commit(f, temp, path);
+    wfc_artifact_abort(f, temp);
+    return false;
 }
 
 static bool world_snapshot_read(const char *path, WorldSnapshot *snapshot) {
@@ -812,6 +806,213 @@ static void toggle_fullscreen_fit(void) {
     set_note("fullscreen fit %s [%dx%d]", g_fullscreen ? "ON" : "off", W_, H_);
 }
 
+/* ---------------- session browser + command palette ---------------- */
+static const char *session_display_dir(void) {
+    return g_session_dir[0] ? g_session_dir : ".";
+}
+
+static void session_browser_refresh(void) {
+    g_session_count = wfc_session_scan(session_display_dir(), g_session_entries,
+                                       WFC_SESSION_MAX);
+    if (g_session_sel >= g_session_count) g_session_sel = g_session_count - 1;
+    if (g_session_sel < 0) g_session_sel = 0;
+    g_session_delete_pending = false;
+}
+
+static void session_browser_open(void) {
+    g_session_browser_was_paused = g_paused;
+    g_paused = true;
+    g_session_sel = 0;
+    g_session_rename_mode = false;
+    session_browser_refresh();
+    g_session_browser = true;
+    full_repaint_ = true;
+}
+
+static void session_browser_close(void) {
+    g_session_browser = false;
+    g_session_rename_mode = false;
+    g_session_delete_pending = false;
+    g_paused = g_session_browser_was_paused;
+    full_repaint_ = true;
+    fputs("\x1b[2J", stdout);
+}
+
+static void session_rename_begin(void) {
+    if (g_session_sel < 0 || g_session_sel >= g_session_count) return;
+    const char *name = g_session_entries[g_session_sel].name;
+    size_t len = strlen(name);
+    const char *dot = strrchr(name, '.');
+    if (dot && dot != name) len = (size_t)(dot - name);
+    if (len >= sizeof g_session_rename_query) len = sizeof g_session_rename_query - 1;
+    memcpy(g_session_rename_query, name, len);
+    g_session_rename_query[len] = 0;
+    g_session_rename_mode = true;
+    g_session_delete_pending = false;
+}
+
+static bool session_browser_load(void) {
+    if (g_session_sel < 0 || g_session_sel >= g_session_count) return false;
+    WfcSessionEntry *entry = &g_session_entries[g_session_sel];
+    if (snprintf(g_world_path, sizeof g_world_path, "%s", entry->path) >=
+            (int)sizeof g_world_path ||
+        snprintf(g_session_meta_path, sizeof g_session_meta_path, "%s", entry->meta_path) >=
+            (int)sizeof g_session_meta_path) return false;
+    g_session_enabled = true;
+    g_session_favorite = entry->favorite;
+    snprintf(g_session_annotation, sizeof g_session_annotation, "%s", entry->annotation);
+    if (!studio_session_load()) return false;
+    set_note("resumed %s", entry->name);
+    return true;
+}
+
+static void render_session_browser(void) {
+    char line[320];
+    fb_reset();
+    fb_puts("\x1b[H\x1b[2J");
+    fb_fg((RGB){150, 232, 255});
+    fb_puts("SESSION BROWSER\n\n");
+    fb_fg((RGB){150, 180, 205});
+    snprintf(line, sizeof line, "  directory: %s  (%d snapshots)\n\n",
+             session_display_dir(), g_session_count);
+    fb_puts(line);
+    if (!g_session_count) {
+        fb_fg((RGB){244, 180, 110});
+        fb_puts("  no snapshots yet — use --session-dir DIR and press W to save\n");
+    }
+    struct winsize ws = {0};
+    int rows = 12;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
+        rows = ws.ws_row > 12 ? (int)ws.ws_row - 10 : 4;
+    if (rows > WFC_SESSION_MAX) rows = WFC_SESSION_MAX;
+    int first = 0;
+    if (g_session_count > rows) {
+        first = g_session_sel - rows / 2;
+        if (first < 0) first = 0;
+        if (first > g_session_count - rows) first = g_session_count - rows;
+    }
+    for (int i = first; i < g_session_count && i < first + rows; i++) {
+        WfcSessionEntry *entry = &g_session_entries[i];
+        bool selected = i == g_session_sel;
+        fb_fg(selected ? (RGB){20, 24, 30} : (RGB){206, 214, 226});
+        if (selected) fb_puts("\x1b[48;2;150;232;255m");
+        snprintf(line, sizeof line, " %s %-24s %-10s seed %-12llu %s",
+                 entry->favorite ? "★" : " ", entry->name,
+                 entry->mode[0] ? entry->mode : "unknown",
+                 (unsigned long long)entry->seed,
+                 entry->annotation[0] ? entry->annotation : "snapshot");
+        fb_puts(line);
+        if (selected) fb_puts("\x1b[49m");
+        fb_puts("\n");
+    }
+    fb_fg((RGB){150, 180, 205});
+    if (g_session_rename_mode)
+        snprintf(line, sizeof line, "\nrename: %s█\n", g_session_rename_query);
+    else if (g_session_delete_pending)
+        snprintf(line, sizeof line, "\npress d again to delete %s\n",
+                 g_session_count ? g_session_entries[g_session_sel].name : "snapshot");
+    else
+        snprintf(line, sizeof line, "\nenter resume   F favorite   r rename   d delete   B/esc/q return\n");
+    fb_puts(line);
+    fb_puts("↑/↓ select   h help");
+    fb_puts("\x1b[0m");
+    frame_begin();
+    fwrite(fb_, 1, fblen_, stdout);
+    frame_end();
+}
+
+static int palette_collect(int *out, int capacity) {
+    int count = 0;
+    for (int i = 0; i < wfc_command_count() && count < capacity; i++) {
+        const WfcCommand *command = wfc_command_at(i);
+        if (wfc_command_matches(command, g_palette_query)) out[count++] = i;
+    }
+    return count;
+}
+
+static void palette_close(void) {
+    g_palette = false;
+    g_paused = g_palette_was_paused;
+    full_repaint_ = true;
+    fputs("\x1b[2J", stdout);
+}
+
+static int execute_palette_command(WfcCommandId id) {
+    switch (id) {
+    case WFC_COMMAND_HELP: g_help = true; g_paused = true; return 0;
+    case WFC_COMMAND_NEW: g_seed = rnd(); return 1;
+    case WFC_COMMAND_NEXT_MODE:
+        setup_mode(g_mode_idx + 1); mode_recent_push(g_mode_idx); g_seed = rnd();
+        apply_size(); if (g_sound) play_stinger(g_mode_idx); return 1;
+    case WFC_COMMAND_PICKER:
+        g_picker_was_paused = g_paused; g_paused = true; g_picker = true;
+        g_picker_query[0] = 0; g_picker_sel = g_mode_idx;
+        if (!sheet_ready_) sheet_scan();
+        return 0;
+    case WFC_COMMAND_OBSERVATORY: g_observe_was_paused = g_paused; g_paused = true; g_observe = true; return 0;
+    case WFC_COMMAND_HEATMAP: g_heatmap = !g_heatmap; set_note("quality heatmap %s", g_heatmap ? "ON" : "off"); return 0;
+    case WFC_COMMAND_EVOLUTION:
+        if (g_nworlds > 1 || g_inf || g_thermo) set_note("evolution: classic single-world only");
+        else { g_evolve_was_paused = g_paused; g_paused = true; if (evolution_run(4)) g_evolve_view = true; }
+        return 0;
+    case WFC_COMMAND_SESSIONS: session_browser_open(); return 0;
+    case WFC_COMMAND_SAVE: {
+        char path[512];
+        if (!g_save_path[0]) snprintf(path, sizeof path, "wfc-%s-%llu.png", mode_name(), (unsigned long long)(g_seed % 100000000ULL));
+        else snprintf(path, sizeof path, "%s", g_save_path);
+        set_note(save_image(path) ? "saved %s (%dx%d)" : "save failed: %s", path, W_, H_);
+        return 0;
+    }
+    case WFC_COMMAND_AUDIO:
+        g_sound = !g_sound; set_note("audio %s", g_sound ? "ON" : "off");
+        if (!g_sound) ambient_stop(); return 0;
+    case WFC_COMMAND_FULLSCREEN: toggle_fullscreen_fit(); return 1;
+    case WFC_COMMAND_QUIT: return 2;
+    case WFC_COMMAND_COUNT: break;
+    }
+    return 0;
+}
+
+static void command_palette_open(void) {
+    g_palette_was_paused = g_paused;
+    g_paused = true;
+    g_palette_query[0] = 0;
+    g_palette_sel = 0;
+    g_palette = true;
+    full_repaint_ = true;
+}
+
+static void render_command_palette(void) {
+    int hits[WFC_COMMAND_COUNT];
+    int count = palette_collect(hits, WFC_COMMAND_COUNT);
+    if (g_palette_sel >= count) g_palette_sel = count ? count - 1 : 0;
+    char line[256];
+    fb_reset();
+    fb_puts("\x1b[H\x1b[2J");
+    fb_fg((RGB){150, 232, 255});
+    fb_puts("COMMAND PALETTE\n\n");
+    fb_fg((RGB){245, 220, 120});
+    snprintf(line, sizeof line, "  command: %s█\n\n", g_palette_query);
+    fb_puts(line);
+    fb_fg((RGB){206, 214, 226});
+    if (!count) fb_puts("  no commands match\n");
+    for (int i = 0; i < count; i++) {
+        const WfcCommand *command = wfc_command_at(hits[i]);
+        bool selected = i == g_palette_sel;
+        if (selected) fb_puts("\x1b[48;2;150;232;255m\x1b[38;2;20;24;30m");
+        snprintf(line, sizeof line, "  %-18s %s", command->name, command->description);
+        fb_puts(line);
+        if (selected) fb_puts("\x1b[49m\x1b[38;2;206;214;226m");
+        fb_puts("\n");
+    }
+    fb_fg((RGB){150, 180, 205});
+    fb_puts("\n↑/↓ select   enter run   esc close");
+    fb_puts("\x1b[0m");
+    frame_begin();
+    fwrite(fb_, 1, fblen_, stdout);
+    frame_end();
+}
+
 /* Keys that arrive as escape sequences, mapped above the byte range.
  * Before this, ESC put the reader into the mouse state machine and any
  * cursor key left it stuck there until an unrelated 'M' or 32 more bytes
@@ -912,6 +1113,87 @@ static int pump_keys(bool tty) {
             g_help = false;
             fputs("\x1b[2J", stdout);
             if (c == 'q' || c == 3) req = req == 1 ? 1 : 2;
+            continue;
+        }
+        if (g_palette) {
+            int hits[WFC_COMMAND_COUNT];
+            int n = palette_collect(hits, WFC_COMMAND_COUNT);
+            if (key == KEY_ESC || c == 3) palette_close();
+            else if (key == KEY_UP) { if (n) g_palette_sel = (g_palette_sel + n - 1) % n; }
+            else if (key == KEY_DOWN) { if (n) g_palette_sel = (g_palette_sel + 1) % n; }
+            else if (c == '\r' || c == '\n') {
+                if (n) {
+                    WfcCommandId id = wfc_command_at(hits[g_palette_sel < n ? g_palette_sel : 0])->id;
+                    palette_close();
+                    int action = execute_palette_command(id);
+                    if (action == 1) req = 1;
+                    else if (action == 2) req = req == 1 ? 1 : 2;
+                }
+            } else if (c == 127 || c == 8) {
+                size_t len = strlen(g_palette_query);
+                if (len) g_palette_query[len - 1] = 0;
+                g_palette_sel = 0;
+            } else if (c >= 32 && c < 127) {
+                size_t len = strlen(g_palette_query);
+                if (len + 1 < sizeof g_palette_query) {
+                    g_palette_query[len] = (char)c;
+                    g_palette_query[len + 1] = 0;
+                    g_palette_sel = 0;
+                }
+            }
+            continue;
+        }
+        if (g_session_browser) {
+            if (g_session_rename_mode) {
+                if (key == KEY_ESC || c == 3) g_session_rename_mode = false;
+                else if (c == '\r' || c == '\n') {
+                    if (g_session_rename_query[0] && g_session_sel < g_session_count) {
+                        if (wfc_session_rename(&g_session_entries[g_session_sel], g_session_rename_query))
+                            set_note("renamed snapshot");
+                        else set_note("rename failed");
+                    }
+                    g_session_rename_mode = false;
+                    session_browser_refresh();
+                } else if (c == 127 || c == 8) {
+                    size_t len = strlen(g_session_rename_query);
+                    if (len) g_session_rename_query[len - 1] = 0;
+                } else if (c >= 32 && c < 127) {
+                    size_t len = strlen(g_session_rename_query);
+                    if (len + 1 < sizeof g_session_rename_query) {
+                        g_session_rename_query[len] = (char)c;
+                        g_session_rename_query[len + 1] = 0;
+                    }
+                }
+                continue;
+            }
+            if (key == KEY_ESC || c == 3 || c == 'B' || c == 'b' || c == 'q') session_browser_close();
+            else if (c == 'h' || c == '?') {
+                session_browser_close();
+                g_help = true;
+            }
+            else if (key == KEY_UP) { if (g_session_count) g_session_sel = (g_session_sel + g_session_count - 1) % g_session_count; }
+            else if (key == KEY_DOWN) { if (g_session_count) g_session_sel = (g_session_sel + 1) % g_session_count; }
+            else if (c == '\r' || c == '\n') {
+                if (session_browser_load()) session_browser_close();
+                else set_note("session load failed");
+            } else if (c == 'F' && g_session_count) {
+                if (wfc_session_toggle_favorite(&g_session_entries[g_session_sel])) {
+                    if (!strcmp(g_world_path, g_session_entries[g_session_sel].path))
+                        g_session_favorite = g_session_entries[g_session_sel].favorite;
+                    session_browser_refresh();
+                } else set_note("favorite update failed");
+            } else if (c == 'r' && g_session_count) session_rename_begin();
+            else if (c == 'd' && g_session_count) {
+                if (g_session_delete_pending) {
+                    WfcSessionEntry removed = g_session_entries[g_session_sel];
+                    if (wfc_session_delete(&removed)) set_note("deleted %s", removed.name);
+                    else set_note("delete failed");
+                    session_browser_refresh();
+                } else {
+                    g_session_delete_pending = true;
+                    set_note("press d again to delete");
+                }
+            }
             continue;
         }
         if (g_picker) {
@@ -1023,6 +1305,8 @@ static int pump_keys(bool tty) {
             full_repaint_ = true;
             continue;
         }
+        if (c == ':') { command_palette_open(); continue; }
+        if (c == 'B') { session_browser_open(); continue; }
         if ((c == 'h' || c == '?') ) { g_help = true; continue; }
         if (c == 'l') {
             g_observe_was_paused = g_paused;
@@ -1129,13 +1413,13 @@ static int pump_keys(bool tty) {
             if (!rgb2) { set_note("clipboard shot too large"); continue; }
             Buf img2 = png_bytes(rgb2, pw2, ph2);
             free(rgb2);
-            char temp2[ARTIFACT_TEMP_CAP];
-            FILE *fp2 = artifact_open("/tmp/wfc_shot.png", temp2, sizeof temp2);
+            char temp2[WFC_ARTIFACT_TEMP_CAP];
+            FILE *fp2 = wfc_artifact_open("/tmp/wfc_shot.png", temp2, sizeof temp2);
             bool shot_ok = false;
             if (fp2) {
                 bool wrote = fwrite(img2.b, 1, img2.n, fp2) == img2.n;
-                if (wrote) shot_ok = artifact_commit(fp2, temp2, "/tmp/wfc_shot.png");
-                else artifact_abort(fp2, temp2);
+                if (wrote) shot_ok = wfc_artifact_commit(fp2, temp2, "/tmp/wfc_shot.png");
+                else wfc_artifact_abort(fp2, temp2);
             }
             buf_free(&img2);
             if (!shot_ok) { set_note("clipboard shot failed"); continue; }

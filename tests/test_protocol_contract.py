@@ -106,6 +106,19 @@ class ProtocolContractTests(unittest.TestCase):
         send(proc, {"v": 1, "t": "stop"})
         self.assertEqual(proc.wait(timeout=2), 0)
 
+    def test_real_worker_accelerated_request_reports_runtime_or_fallback(self):
+        proc = self.launch_worker(REAL_WORKER)
+        payload = init_payload()
+        payload["accelerated"] = True
+        send(proc, payload)
+        ready = read_event(proc)
+        self.assertEqual(ready["t"], "ready")
+        self.assertEqual(ready["requested_sampler"], "thrml")
+        self.assertIn(ready["sampler"], ("python", "thrml"))
+        self.assertIn("fallback", ready)
+        send(proc, {"v": 1, "t": "stop"})
+        self.assertEqual(proc.wait(timeout=2), 0)
+
     def test_quality_focus_and_metrics_are_validated_without_learning(self):
         proc = self.launch_worker(REAL_WORKER)
         payload = init_payload()

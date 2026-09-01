@@ -37,9 +37,12 @@
 #include <zlib.h>
 
 #include "wfc_core.h"
+#include "wfc_artifact.h"
+#include "wfc_commands.h"
 #include "wfc_mode.h"
 #include "wfc_platform.h"
 #include "wfc_quality.h"
+#include "wfc_session.h"
 #include "wfc_solver.h"
 
 #define MAXT 64
@@ -58,7 +61,7 @@
 #include "wfc_ui.h"
 
 /* ---------------- main ---------------- */
-#define WFC_VERSION "0.4.0"
+#define WFC_VERSION "0.5.0"
 
 static bool parse_long_range(const char *text, long min, long max, long *out) {
     if (!text || !*text) return false;
@@ -128,6 +131,20 @@ static bool copy_path_arg(char *dst, size_t cap, const char *value,
     }
     memcpy(dst, value, strlen(value) + 1);
     return true;
+}
+
+static void session_dir_from_path(const char *path) {
+    if (g_session_dir_explicit || !path || !*path) return;
+    const char *slash = strrchr(path, '/');
+    if (!slash) {
+        snprintf(g_session_dir, sizeof g_session_dir, ".");
+        return;
+    }
+    size_t len = (size_t)(slash - path);
+    if (len == 0) len = 1; /* root */
+    if (len >= sizeof g_session_dir) return;
+    memcpy(g_session_dir, path, len);
+    g_session_dir[len] = 0;
 }
 
 static void pan_camera_tick(void) {
@@ -212,8 +229,8 @@ static void cfg_load(void) {
 static void cfg_save(void) {
     char p[512];
     if (!cfg_expand(p, sizeof p)) return;
-    char temp[ARTIFACT_TEMP_CAP];
-    FILE *f = artifact_open(p, temp, sizeof temp);
+    char temp[WFC_ARTIFACT_TEMP_CAP];
+    FILE *f = wfc_artifact_open(p, temp, sizeof temp);
     if (!f) return;
     (void)fchmod(fileno(f), 0600);
     char recent[256];
@@ -223,29 +240,32 @@ static void cfg_save(void) {
                       mode_name(), g_theme & 7, g_speed,
                       (int)(g_bias * 1000), (int)g_sound, (int)g_crt, (int)g_zen,
                       (int)g_colorblind, (unsigned long long)g_favorite_modes, recent) >= 0;
-    if (ok) (void)artifact_commit(f, temp, p);
-    else artifact_abort(f, temp);
+    if (ok) (void)wfc_artifact_commit(f, temp, p);
+    else wfc_artifact_abort(f, temp);
 }
 
 static bool studio_session_write_metadata(void) {
     if (!g_session_enabled || !g_session_meta_path[0]) return true;
-    char temp[ARTIFACT_TEMP_CAP];
-    FILE *f = artifact_open(g_session_meta_path, temp, sizeof temp);
+    char temp[WFC_ARTIFACT_TEMP_CAP];
+    FILE *f = wfc_artifact_open(g_session_meta_path, temp, sizeof temp);
     if (!f) return false;
     bool ok = fprintf(f,
         "schema=1\nmode=%s\nseed=%llu\ntheme=%d\nspeed=%ld\nbias=%d\n"
         "sound=%d\ncrt=%d\nzen=%d\ncolorblind=%d\npan=%d\nheatmap=%d\n"
-        "entropy=%d\n",
+        "entropy=%d\nfavorite=%d\nannotation=%s\n",
         mode_name(), (unsigned long long)g_seed, g_theme & 7, g_speed,
         (int)(g_bias * 1000.0 + 0.5), (int)g_sound, (int)g_crt, (int)g_zen,
-        (int)g_colorblind, (int)g_pan, (int)g_heatmap, (int)g_entropy_view) >= 0;
-    if (ok) ok = artifact_commit(f, temp, g_session_meta_path);
-    else artifact_abort(f, temp);
+        (int)g_colorblind, (int)g_pan, (int)g_heatmap, (int)g_entropy_view,
+        (int)g_session_favorite,
+        g_session_annotation[0] ? g_session_annotation : mode_spec()->blurb) >= 0;
+    if (ok) ok = wfc_artifact_commit(f, temp, g_session_meta_path);
+    else wfc_artifact_abort(f, temp);
     return ok;
 }
 
 static bool studio_session_save(void) {
     if (!g_session_enabled) return world_save_file(g_world_path);
+    if (g_session_dir[0] && !wfc_session_ensure_dir(g_session_dir)) return false;
     return world_save_file(g_world_path) && studio_session_write_metadata();
 }
 
@@ -272,6 +292,8 @@ static bool studio_session_load(void) {
         else if (!strcmp(line, "pan") && parse_long_range(v, 0, 1, &value)) g_pan = value != 0;
         else if (!strcmp(line, "heatmap") && parse_long_range(v, 0, 1, &value)) g_heatmap = value != 0;
         else if (!strcmp(line, "entropy") && parse_long_range(v, 0, 1, &value)) g_entropy_view = value != 0;
+        else if (!strcmp(line, "favorite") && parse_long_range(v, 0, 1, &value)) g_session_favorite = value != 0;
+        else if (!strcmp(line, "annotation")) snprintf(g_session_annotation, sizeof g_session_annotation, "%s", v);
     }
     fclose(f);
     BIOMES = BIOMES_SEASONAL[(g_theme & 7) >= 4 ? (g_theme & 7) - 4 : 0];
@@ -348,13 +370,22 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--solver")) {
             const char *sv = NEXTV();
             if (!strcmp(sv, "thermo") || !strcmp(sv, "thermo=potts")) {
-                g_thermo = true; snprintf(g_thermo_form, sizeof g_thermo_form, "potts");
+                g_thermo = true; g_thermo_accelerated = false;
+                snprintf(g_thermo_form, sizeof g_thermo_form, "potts");
+            }
+            else if (!strcmp(sv, "thermo-accelerated") ||
+                     !strcmp(sv, "thermo=accelerated")) {
+                g_thermo = true; g_thermo_accelerated = true;
+                snprintf(g_thermo_form, sizeof g_thermo_form, "potts");
             }
             else if (!strcmp(sv, "thermo=ising")) {
-                g_thermo = true; snprintf(g_thermo_form, sizeof g_thermo_form, "ising");
+                g_thermo = true; g_thermo_accelerated = false;
+                snprintf(g_thermo_form, sizeof g_thermo_form, "ising");
             }
-            else if (!strcmp(sv, "classic")) g_thermo = false;
-            else { fprintf(stderr, "solver must be classic|thermo(=potts|=ising)\n"); return 2; }
+            else if (!strcmp(sv, "classic")) {
+                g_thermo = false; g_thermo_accelerated = false;
+            }
+            else { fprintf(stderr, "solver must be classic|thermo|thermo-accelerated(=potts|=ising)\n"); return 2; }
         }
         else if (!strcmp(argv[i], "--no-learn")) g_thermo_learn = false;
         else if (!strcmp(argv[i], "--thermo-profile")) {
@@ -499,6 +530,12 @@ int main(int argc, char **argv) {
                 return 2;
             }
             g_session_enabled = true;
+            session_dir_from_path(g_world_path);
+        }
+        else if (!strcmp(argv[i], "--session-dir")) {
+            if (!copy_path_arg(g_session_dir, sizeof g_session_dir, NEXTV(), "--session-dir"))
+                return 2;
+            g_session_dir_explicit = true;
         }
         else if (!strcmp(argv[i], "--inspect-world")) {
             const char *world = NEXTV();
@@ -527,8 +564,10 @@ int main(int argc, char **argv) {
                    "  --report FILE.json               quality + thermo + studio report\n"
                    "  --world-file FILE                W/L interactive world snapshot path\n"
                    "  --session FILE                   W/L snapshot plus UI metadata sidecar\n"
+                   "  --session-dir DIR               browse/save snapshots in DIR (current.wfc)\n"
                    "  --inspect-world FILE             validate and print WFC1 metadata as JSON\n"
-                   "  --solver classic|thermo          collapse engine (thermo = adaptive sidecar)\n"
+                   "  --solver classic|thermo|thermo-accelerated\n"
+                   "                                   collapse engine; accelerated uses THRML/JAX\n"
                    "  --no-learn                       disable persistent thermo preferences\n"
                    "  --thermo-profile DIR             store thermo profiles in DIR\n"
                    "  --reset-learning                 clear the active thermo profile\n"
@@ -562,12 +601,24 @@ int main(int argc, char **argv) {
                    "      [ ] density | Y red/green assist | a audio | h help\n"
                    "      i iso | , . scrub collapse | wasd hero in dungeon\n"
                    "      l observatory | Q heatmap | E evolution | P pin/unpin hover\n"
-                   "      x repair hotspot | F favorite in picker\n"
+                   "      x repair hotspot | F favorite in picker/browser\n"
+                   "      : command palette | B session browser\n"
                    "      F fullscreen fit | +/- speed p pause g gif s save q quit\n"
                    "build: make\n");
             return 0;
         }
         else { fprintf(stderr, "unknown arg %s (try --help)\n", argv[i]); return 2; }
+    }
+
+    if (g_session_dir_explicit && !g_session_enabled) {
+        if (snprintf(g_world_path, sizeof g_world_path, "%s/current.wfc", g_session_dir) >=
+            (int)sizeof g_world_path ||
+            snprintf(g_session_meta_path, sizeof g_session_meta_path, "%s.meta", g_world_path) >=
+            (int)sizeof g_session_meta_path) {
+            fprintf(stderr, "invalid value for --session-dir: snapshot path is too long\n");
+            return 2;
+        }
+        g_session_enabled = true;
     }
 
     if (g_nworlds > 1 && g_inf) {
@@ -610,13 +661,13 @@ int main(int argc, char **argv) {
         apply_bloom(big, W3, H3);
         Buf img = png_bytes(big, W3, H3);
         free(big);
-        char temp[ARTIFACT_TEMP_CAP];
-        FILE *fp = artifact_open(g_collage_path, temp, sizeof temp);
+        char temp[WFC_ARTIFACT_TEMP_CAP];
+        FILE *fp = wfc_artifact_open(g_collage_path, temp, sizeof temp);
         bool ok = false;
         if (fp) {
             bool wrote = fwrite(img.b, 1, img.n, fp) == img.n;
-            if (wrote) ok = artifact_commit(fp, temp, g_collage_path);
-            else artifact_abort(fp, temp);
+            if (wrote) ok = wfc_artifact_commit(fp, temp, g_collage_path);
+            else wfc_artifact_abort(fp, temp);
         }
         buf_free(&img);
         if (!ok) {
@@ -835,6 +886,8 @@ inf_continue:
             if (g_stop) break;
             if (req == 1) break;
             if (g_help) { if (!g_gfx) render_help(); msleep(50); continue; }
+            if (g_palette) { if (!g_gfx) render_command_palette(); msleep(50); continue; }
+            if (g_session_browser) { if (!g_gfx) render_session_browser(); msleep(50); continue; }
             if (g_picker) { if (!g_gfx) render_picker(); msleep(50); continue; }
             if (g_observe) { if (!g_gfx) render_observatory(); msleep(80); continue; }
             if (g_evolve_view) { if (!g_gfx) render_evolution_lab(); msleep(80); continue; }

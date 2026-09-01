@@ -23,6 +23,11 @@
       "min_successes": 10,
       "max_p95_ms": 2500.0,
       "min_median_quality": 0.90
+    },
+    "thermo-accelerated": {
+      "min_successes": 10,
+      "max_p95_ms": 20000.0,
+      "min_median_quality": 0.88
     }
   }
 }

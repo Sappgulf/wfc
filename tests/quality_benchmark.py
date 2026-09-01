@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare quality and solve cost across the three supported solver paths."""
+"""Compare quality and solve cost across the portable and accelerated paths."""
 
 import argparse
 import json
@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 MODES = ("streets", "neurons", "mycelium", "delta", "rail")
-SOLVERS = ("classic", "thermo-ephemeral", "thermo-learned")
+SOLVERS = ("classic", "thermo-ephemeral", "thermo-learned", "thermo-accelerated")
 
 
 def run_case(binary, mode, solver, trial, width, height, profile_dir):
@@ -24,7 +24,8 @@ def run_case(binary, mode, solver, trial, width, height, profile_dir):
         str(binary), "--mode", mode, "--seed", str(seed),
         "--w", str(width), "--h", str(height), "--once",
         "--report", str(report), "--solver",
-        "classic" if solver == "classic" else "thermo",
+        "classic" if solver == "classic" else
+        "thermo-accelerated" if solver == "thermo-accelerated" else "thermo",
     ]
     if solver != "classic":
         run_profile.mkdir(parents=True, exist_ok=True)
@@ -37,13 +38,13 @@ def run_case(binary, mode, solver, trial, width, height, profile_dir):
         env["HOME"] = profile_dir          # never touch the user's ~/.wfcrc
         result = subprocess.run(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=30, env=env,
+            text=True, timeout=60, env=env,
         )
         elapsed_ms = (time.monotonic() - started) * 1000.0
     except subprocess.TimeoutExpired as error:
         return {
             "mode": mode, "solver": solver, "trial": trial, "seed": seed,
-            "success": False, "quality": 0.0, "ms": 30000.0,
+            "success": False, "quality": 0.0, "ms": 60000.0,
             "error": "timeout: %s" % error,
         }
     payload = None
@@ -61,6 +62,8 @@ def run_case(binary, mode, solver, trial, width, height, profile_dir):
         "success": result.returncode == 0 and isinstance(payload, dict),
         "quality": round(quality, 6),
         "ms": round(elapsed_ms, 3),
+        "backend": payload.get("backend") if isinstance(payload, dict) else None,
+        "sampler": payload.get("thermo", {}).get("sampler") if isinstance(payload, dict) else None,
         **({"error": error} if result.returncode != 0 or not payload else {}),
     }
 
@@ -148,7 +151,7 @@ def main():
             solver, item["median_ms"], item["p95_ms"], item["median_quality"],
         ))
     payload = {
-        "schema": 2,
+        "schema": 3,
         "trials": args.trials,
         "dimensions": {"w": args.w, "h": args.h},
         "solvers": list(SOLVERS),

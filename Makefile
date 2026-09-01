@@ -1,13 +1,19 @@
 CC ?= cc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra
 LDLIBS = -lz
+VERSION ?= 0.5.0
+PREFIX ?= /usr/local
+BUNDLE ?= dist/WFC.app
+MACOS_ARCH := $(shell uname -m)
 
-# wfc's main program is one translation unit: wfc.c includes these parts in
-# order. The small dependency-free modules below provide testable seams. The
-# files are listed here so editing one triggers a rebuild.
+# wfc's main program still includes the world/render/UI parts in order. The
+# filesystem, command, and solver seams are real separately compiled modules;
+# listing both parts and modules keeps incremental rebuilds honest.
 PARTS = wfc_world.h wfc_render.h wfc_export.h wfc_audio.h wfc_thermo.h wfc_ui.h
-MODULES = wfc_core.c wfc_mode.c wfc_platform.c wfc_quality.c wfc_solver.c
-HEADERS = wfc_core.h wfc_mode.h wfc_platform.h wfc_quality.h wfc_solver.h
+MODULES = wfc_artifact.c wfc_commands.c wfc_core.c wfc_mode.c wfc_platform.c \
+	wfc_quality.c wfc_session.c wfc_solver.c
+HEADERS = wfc_artifact.h wfc_commands.h wfc_core.h wfc_mode.h wfc_platform.h \
+	wfc_quality.h wfc_session.h wfc_solver.h
 
 wfc: wfc.c $(PARTS) $(MODULES) $(HEADERS)
 	$(CC) $(CFLAGS) -o $@ $< $(MODULES) $(LDLIBS)
@@ -64,7 +70,7 @@ python-check:
 		tests/test_interactive.py tests/test_docs.py tests/test_fuzz_headless.py \
 		tests/test_cli_features.py tests/test_performance_gate.py tests/fuzz_headless.py \
 		tests/performance_gate.py tests/thermo_sweep.py tests/doctor.py \
-		tests/test_graphics_audio.py
+		tests/test_graphics_audio.py tests/test_visual_regression.py tests/test_accelerated.py
 	@echo 'python: syntax OK'
 
 protocol-check:
@@ -113,9 +119,18 @@ quality-benchmark: wfc
 module-check:
 	@cc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
 		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /tmp/wfc_module_test \
-		tests/test_wfc_modules.c wfc_mode.c wfc_platform.c wfc_quality.c wfc_solver.c -lm
+		tests/test_wfc_modules.c wfc_commands.c wfc_mode.c wfc_platform.c \
+		wfc_quality.c wfc_solver.c -lm
 	@/tmp/wfc_module_test
-	@echo 'modules: mode, platform, solver, and quality contracts OK'
+	@cc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
+		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /tmp/wfc_artifact_test \
+		tests/test_wfc_artifact.c wfc_artifact.c
+	@/tmp/wfc_artifact_test
+	@cc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
+		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /tmp/wfc_session_test \
+		tests/test_wfc_session.c wfc_session.c wfc_artifact.c
+	@/tmp/wfc_session_test
+	@echo 'modules: commands, sessions, artifacts, mode, platform, solver, and quality contracts OK'
 
 doctor: wfc
 	@python3 tests/doctor.py --binary ./wfc
@@ -126,6 +141,9 @@ graphics-smoke: wfc
 audio-smoke: wfc
 	@python3 tests/test_graphics_audio.py --audio --binary ./wfc
 
+visual-regression: wfc
+	@python3 -m unittest tests.test_visual_regression -v
+
 large-benchmark: wfc
 	@./wfc --bench --w 48 --h 30 >/tmp/wfc-large-benchmark.txt
 	@test "$$(wc -l </tmp/wfc-large-benchmark.txt | tr -d ' ')" -ge 38
@@ -134,7 +152,25 @@ large-benchmark: wfc
 thermo-env:
 	@python3 -m venv .venv-thermo
 	@.venv-thermo/bin/python -m pip install -r requirements-thermo.lock
-	@echo 'thermo-env: ready; run WFC_PYTHON=.venv-thermo/bin/python ./wfc --solver thermo'
+	@echo 'thermo-env: ready; run ./wfc --solver thermo-accelerated'
+
+macos-bundle: wfc
+	@test "$$(uname -s)" = "Darwin" || { echo 'macos-bundle: macOS is required'; exit 2; }
+	@rm -rf "$(BUNDLE)"
+	@mkdir -p "$(BUNDLE)/Contents/MacOS" "$(BUNDLE)/Contents/Resources"
+	@install -m 0755 wfc "$(BUNDLE)/Contents/MacOS/wfc"
+	@install -m 0644 wfc_thermo.py wfc_learning.py "$(BUNDLE)/Contents/MacOS/"
+	@install -m 0644 packaging/macos/Info.plist "$(BUNDLE)/Contents/Info.plist"
+	@install -m 0644 README.md "$(BUNDLE)/Contents/Resources/README.md"
+	@plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(BUNDLE)/Contents/Info.plist"
+	@plutil -replace CFBundleVersion -string "$(VERSION)" "$(BUNDLE)/Contents/Info.plist"
+	@if command -v codesign >/dev/null 2>&1; then codesign --force --deep --sign - "$(BUNDLE)" >/dev/null; fi
+	@echo 'macos-bundle: $(BUNDLE) version $(VERSION) ready'
+
+macos-tarball: macos-bundle
+	@mkdir -p dist
+	@tar -czf "dist/wfc-$(VERSION)-macos-$(MACOS_ARCH).tar.gz" -C dist WFC.app
+	@echo 'macos-tarball: dist/wfc-$(VERSION)-macos-$(MACOS_ARCH).tar.gz ready'
 
 performance-check: wfc
 	@python3 -m unittest tests.test_quality_benchmark tests.test_performance_gate -v
@@ -151,6 +187,9 @@ cli-check: wfc
 
 thermo-check: wfc wfc_asan
 	@python3 tests/thermo_sweep.py --binary ./wfc_asan --worker ./tests/fake_thermo.py
+
+accelerated-check: wfc
+	@python3 -m unittest tests.test_accelerated -v
 
 interactive-asan-check: wfc_asan
 	@WFC_BINARY=./wfc_asan ASAN_OPTIONS=detect_leaks=0 \
@@ -183,7 +222,7 @@ check-fast: strict test regression python-check protocol-check bridge-check \
 # graphics/audio contracts, and a larger 48x30 benchmark.
 check-full: check-fast quality-check studio-check thermo-check interactive-check \
 	   interactive-asan-check performance-check perf-check quality-benchmark \
-	   large-benchmark graphics-smoke audio-smoke sweep fuzz doctor
+	   large-benchmark graphics-smoke audio-smoke visual-regression accelerated-check sweep fuzz doctor
 	@echo "check-full: all suites clean"
 
 # Backwards-compatible default for local contributors and CI callers.
@@ -194,10 +233,12 @@ clean:
 	rm -rf wfc wfc_asan wfc_debug wfc_asan.dSYM
 
 install: wfc
-	install -m 0755 wfc /usr/local/bin/wfc
+	install -d "$(DESTDIR)$(PREFIX)/bin"
+	install -m 0755 wfc "$(DESTDIR)$(PREFIX)/bin/wfc"
 
 .PHONY: check check-fast check-full clean install asan strict debug test regression \
 	python-check protocol-check bridge-check learning-check quality-check studio-check \
 	studio-c-check module-check core-check docs-check cli-check thermo-check \
 	interactive-check interactive-asan-check performance-check perf-check \
-	quality-benchmark large-benchmark thermo-env graphics-smoke audio-smoke doctor sweep fuzz
+	quality-benchmark large-benchmark thermo-env graphics-smoke audio-smoke visual-regression accelerated-check doctor sweep fuzz \
+	macos-bundle macos-tarball

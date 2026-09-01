@@ -19,25 +19,27 @@ class QualityBenchmarkTests(unittest.TestCase):
                 [sys.executable, str(SCRIPT), "--binary", str(ROOT / "wfc"),
                  "--trials", "1", "--w", "8", "--h", "6", "--json-out",
                  str(artifact)], cwd=ROOT, capture_output=True, text=True,
-                timeout=30,
+                timeout=90,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(artifact.exists())
             self.assertIn("QUALITY BENCHMARK", result.stdout)
             payload = json.loads(artifact.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema"], 2)
+        self.assertEqual(payload["schema"], 3)
         self.assertEqual(set(payload["solvers"]), {
-            "classic", "thermo-ephemeral", "thermo-learned",
+            "classic", "thermo-ephemeral", "thermo-learned", "thermo-accelerated",
         })
         self.assertEqual({item["mode"] for item in payload["results"]},
                          {"streets", "neurons", "mycelium", "delta", "rail"})
         self.assertTrue(all(item["success"] for item in payload["results"]))
         self.assertEqual(set(payload["summary"]), {
-            "classic", "thermo-ephemeral", "thermo-learned",
+            "classic", "thermo-ephemeral", "thermo-learned", "thermo-accelerated",
         })
         for solver in payload["summary"]:
             self.assertIn("median_ms", payload["summary"][solver])
             self.assertIn("p95_ms", payload["summary"][solver])
+        self.assertTrue(all("backend" in item and "sampler" in item
+                            for item in payload["results"]))
 
     def test_profile_isolation_for_non_classic_solvers(self):
         run_calls = []
@@ -56,7 +58,8 @@ class QualityBenchmarkTests(unittest.TestCase):
 
             with patch("tests.quality_benchmark.subprocess.run", side_effect=fake_run):
                 import tests.quality_benchmark as qb
-                for solver in ("classic", "thermo-ephemeral", "thermo-learned"):
+                for solver in ("classic", "thermo-ephemeral", "thermo-learned",
+                               "thermo-accelerated"):
                     qb.run_case(str(profile_root / "wfc"), "streets", solver, 0, 8, 6,
                                 profile_root / "profiles")
 
@@ -66,6 +69,8 @@ class QualityBenchmarkTests(unittest.TestCase):
                              str(profile_root / "profiles" / "streets" / "thermo-ephemeral" / "trial-0"))
             self.assertEqual(run_calls[2][run_calls[2].index("--thermo-profile") + 1],
                              str(profile_root / "profiles" / "streets" / "thermo-learned" / "trial-0"))
+            self.assertEqual(run_calls[3][run_calls[3].index("--solver") + 1],
+                             "thermo-accelerated")
 
 
 if __name__ == "__main__":

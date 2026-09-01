@@ -74,6 +74,10 @@ class CliFeatureTests(unittest.TestCase):
             self.assertIn("id='filter'", gallery)
             self.assertIn("data-quality=", gallery)
             self.assertIn("sort.value", gallery)
+            self.assertIn("data-annotation=", gallery)
+            self.assertIn("wfc://", gallery)
+            self.assertIn("compare selected", gallery)
+            self.assertIn("function compareSelected", gallery)
             self.assertTrue(outputs["collage"].read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_help_names_the_world_inspector(self):
@@ -81,6 +85,10 @@ class CliFeatureTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--inspect-world FILE", result.stdout)
         self.assertIn("--session FILE", result.stdout)
+        self.assertIn("--session-dir DIR", result.stdout)
+        self.assertIn("thermo-accelerated", result.stdout)
+        self.assertIn(": command palette", result.stdout)
+        self.assertIn("B session browser", result.stdout)
 
     def test_inspect_world_reports_metadata_and_rejects_tampering(self):
         with tempfile.TemporaryDirectory() as tmp:

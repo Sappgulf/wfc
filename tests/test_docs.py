@@ -19,6 +19,10 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("make check-fast", readme)
         self.assertIn("make doctor", readme)
         self.assertIn("requirements-thermo.lock", readme)
+        self.assertIn("thermo-accelerated", readme)
+        self.assertIn("--session-dir", readme)
+        self.assertIn("make macos-bundle", readme)
+        self.assertIn("make visual-regression", readme)
         self.assertIn("all 37 modes", readme)
         self.assertNotIn("all 25 modes", readme)
         for mode in modes:

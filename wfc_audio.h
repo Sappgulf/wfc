@@ -33,8 +33,8 @@ static bool write_wav(const char *path, const float *samples, int n) {
     if (!path || !samples || n < 0 ||
         (uint64_t)n > ((uint64_t)UINT32_MAX - 36) / 2)
         return false;
-    char temp[ARTIFACT_TEMP_CAP];
-    FILE *f = artifact_open(path, temp, sizeof temp);
+    char temp[WFC_ARTIFACT_TEMP_CAP];
+    FILE *f = wfc_artifact_open(path, temp, sizeof temp);
     if (!f) return false;
     uint32_t datasz = (uint32_t)n * 2;
     bool ok = fwrite("RIFF", 1, 4, f) == 4 && put_u32(f, 36 + datasz) &&
@@ -49,8 +49,8 @@ static bool write_wav(const char *path, const float *samples, int n) {
         int16_t v16 = (int16_t)(s * 32000);
         ok = put_u16(f, (uint16_t)v16);
     }
-    if (ok) ok = artifact_commit(f, temp, path);
-    else artifact_abort(f, temp);
+    if (ok) ok = wfc_artifact_commit(f, temp, path);
+    else wfc_artifact_abort(f, temp);
     return ok;
 }
 /* Two hand-kept tables of 25 used to carry the sound: stinger note rows and
