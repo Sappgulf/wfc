@@ -4,7 +4,7 @@
  * the counterfactual guard, and the learned-profile loader
  *
  * wfc is deliberately one translation unit: wfc.c includes these parts in
- * order, so `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz` still builds the whole thing
+ * order, so `make` still builds the whole thing
  * with no build system. They are cut at the section boundaries that were
  * already there, in the order the compiler saw them, so the token stream is
  * unchanged -- these are not independent modules and have no include guards
@@ -96,6 +96,13 @@ static void thermo_kill(void) {
      * world produced a cfg of the wrong length and failed the whole solver.
      * Any relaunch hits this: toggling T off and on, or --reset-learning. */
     thermo_lbl = 0;
+}
+
+static const char *thermo_backend_name(void) {
+    if (!g_thermo) return "classic";
+    if (!strcmp(thermo_sampler_, "python")) return "python-bounded";
+    if (!strcmp(thermo_sampler_, "thrml")) return "thrml-jax";
+    return "thermo-sidecar";
 }
 
 static void thermo_json_string(FILE *f, const char *s) {
@@ -815,17 +822,22 @@ static bool save_report(const char *path) {
     if (!path || !*path) return false;
     QualityMetrics q = quality_measure(true);
     quality_record(q);
-    FILE *f = fopen(path, "w");
+    char temp[ARTIFACT_TEMP_CAP];
+    FILE *f = artifact_open(path, temp, sizeof temp);
     if (!f) return false;
     fprintf(f, "{\"schema\":2,\"mode\":\"%s\",\"seed\":%llu,"
                "\"dimensions\":{\"w\":%d,\"h\":%d},\"solver\":\"%s\","
-               "\"quality\":",
+               "\"backend\":",
             mode_name(), (unsigned long long)g_seed, W_, H_,
             g_thermo ? "thermo" : "classic");
+    thermo_json_string(f, thermo_backend_name());
+    fputs(",\"quality\":", f);
     quality_json(f, q);
     fprintf(f, ",\"thermo\":{\"enabled\":%s,\"sampler\":",
             g_thermo ? "true" : "false");
     thermo_json_string(f, thermo_sampler_);
+    fputs(",\"backend\":", f);
+    thermo_json_string(f, thermo_backend_name());
     fprintf(f, ",\"round\":%ld,\"observations\":%ld,\"proposals\":%ld,"
                "\"accepted\":%ld,\"rejected\":%ld,\"displaced\":%ld,"
                "\"contradictions\":%ld,"
@@ -845,7 +857,9 @@ static bool save_report(const char *path) {
     for (int i = 0; i < g_evolution_n; i++)
         fprintf(f, "%s%.9g", i ? "," : "", quality_clamp(g_evolution_scores[i]));
     fputs("]}}\n", f);
-    bool ok = ferror(f) == 0 && fclose(f) == 0;
+    bool ok = ferror(f) == 0;
+    if (ok) ok = artifact_commit(f, temp, path);
+    else artifact_abort(f, temp);
     if (!ok) return false;
     return true;
 }
@@ -870,6 +884,8 @@ static bool picker_tag_matches(const ModeSpec *mode, const char *tag) {
     if (!strcmp(tag, "coarse")) return mode->coarse;
     if (!strcmp(tag, "torus")) return mode->torus;
     if (!strcmp(tag, "static")) return mode->tick_ms == 0;
+    if (!strcmp(tag, "favorite")) return mode_favorite((int)(mode - MODESPEC));
+    if (!strcmp(tag, "recent")) return mode_recent((int)(mode - MODESPEC));
     return false;
 }
 
@@ -908,7 +924,7 @@ static void render_picker(void) {
     snprintf(line, sizeof line, "  search: %s\xe2\x96\x88\n\n", g_picker_query);
     fb_puts(line);
     fb_fg((RGB){120, 132, 148});
-    fb_puts("  tags: #field #connector #network #animated #coarse #torus #static\n\n");
+    fb_puts("  tags: #field #connector #network #animated #coarse #torus #static #favorite #recent\n\n");
     if (!n) {
         fb_fg((RGB){244, 120, 110});
         fb_puts("  no world matches\n");
@@ -936,12 +952,14 @@ static void render_picker(void) {
     for (int k = first; k < n && k < first + rows; k++) {
         const ModeSpec *m = &MODESPEC[hits[k]];
         bool sel = k == g_picker_sel, cur = hits[k] == g_mode_idx;
-        char note[80];
+        char note[80], marker[8];
         snprintf(note, sizeof note, "%.*s", blurb, m->blurb);
+        snprintf(marker, sizeof marker, "%s", cur ? "\xe2\x97\x8f" :
+                 mode_favorite(hits[k]) ? "\xe2\x98\x85" : mode_recent(hits[k]) ? "\xc2\xb7" : " ");
         fb_fg(sel ? (RGB){20, 24, 30} : cur ? (RGB){245, 200, 90} : (RGB){206, 214, 226});
         if (sel) fb_puts("\x1b[48;2;150;232;255m");
         snprintf(line, sizeof line, " %s %-9s %-*s ",
-                 cur ? "\xe2\x97\x8f" : " ", m->name, blurb, note);
+                 marker, m->name, blurb, note);
         fb_puts(line);
         if (sel) fb_puts("\x1b[49m");
         fb_puts("\n");
@@ -969,7 +987,7 @@ static void render_picker(void) {
     }
     fb_fg((RGB){120, 132, 148});
     snprintf(line, sizeof line,
-             "\n  %d/%d worlds   type or #tag to filter   up/down select   enter go   esc cancel\n",
+             "\n  %d/%d worlds   type or #tag to filter   up/down select   enter go   F favorite   esc cancel\n",
              n, NMODES);
     fb_puts(line);
     fb_puts("\x1b[0m");
@@ -1051,8 +1069,8 @@ static void render_observatory(void) {
     }
     fb_puts("\n\n");
     fb_fg((RGB){150, 180, 205});
-    fb_puts("l return   Q heatmap   E evolution   F fit fullscreen   P pin/unpin hover\n");
-    fb_puts("right-click unpin   h help   q quit\n");
+    fb_puts("l return   Q heatmap   E evolution   x repair hotspot (keeps pins)   F fit fullscreen\n");
+    fb_puts("P pin/unpin hover   right-click unpin   h help   q quit\n");
     fb_puts("report: use --report FILE.json for reproducible quality + thermo + studio data");
     fb_puts("\x1b[0m");
     frame_begin();

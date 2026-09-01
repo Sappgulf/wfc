@@ -4,7 +4,7 @@
  * learned tile preferences, and the deterministic quality metrics
  *
  * wfc is deliberately one translation unit: wfc.c includes these parts in
- * order, so `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz` still builds the whole thing
+ * order, so `make` still builds the whole thing
  * with no build system. They are cut at the section boundaries that were
  * already there, in the order the compiler saw them, so the token stream is
  * unchanged -- these are not independent modules and have no include guards
@@ -69,6 +69,7 @@ enum {              /* cross-cutting behavior declared by the registry */
 };
 
 typedef struct {
+    WfcModeId id;           /* stable identity used by extension code */
     const char *name;
     const char *blurb;
     void (*build)(void);
@@ -83,47 +84,48 @@ typedef struct {
     unsigned tick_ms;     /* idle-animation clock bucket; 0 = static */
     signed char tone;     /* semitones from A2: the world's key, drone and stinger */
     unsigned char flags;   /* quality topology and post-solve animation behavior */
-} ModeSpec;
+} WfcModeOps;
+typedef WfcModeOps ModeSpec;
 
 /*             name        blurb                                             build            sc     tor    sr     ramp   flip   net    crse   group         tick  key */
 static const ModeSpec MODESPEC[] = {
-    {"circuit",  "rainbow circuit boards, signals racing traces",   build_circuit,  false, true,  false, false, false, false, false, MG_CONNECTOR, 140,   0, MF_TOPOLOGY},
-    {"terrain",  "hillshaded biomes + carved rivers + day cycle",   build_terrain,  true,  true,  true,  false, false, false, false, MG_FIELD,     260,  -2, MF_NONE},
-    {"truchet",  "woven arcs with a travelling light pulse",        build_truchet,  false, false, false, false, false, false, false, MG_CONNECTOR, 500,   7, MF_TOPOLOGY},
-    {"fire",     "living flames with rising embers",                build_fire,     true,  false, true,  true,  false, false, false, MG_FIELD,      90,  -3, MF_LINGER_ANIM},
-    {"waves",    "rolling ocean, crest lines, moonpath",            build_waves,    true,  true,  true,  false, false, false, true,  MG_FIELD,     160,  -5, MF_LINGER_ANIM},
-    {"dungeon",  "torch-lit catacombs with breathing warmth",       build_dungeon,  false, true,  false, false, false, false, false, MG_CARVE,     220, -10, MF_TOPOLOGY},
-    {"maze",     "labyrinth with wall pulses",                      build_maze,     false, true,  false, false, false, false, false, MG_CARVE,     360,  -7, MF_TOPOLOGY},
-    {"galaxy",   "nebulae with shooting stars",                     build_galaxy,   true,  true,  true,  false, false, false, true,  MG_FIELD,     100,   5, MF_LINGER_ANIM},
-    {"city",     "night skylines with beacons + rain",              build_city,     true,  false, true,  true,  false, false, false, MG_FIELD,     400,  -6, MF_LINGER_ANIM},
-    {"aurora",   "drifting green curtains over stars",              build_aurora,   true,  false, true,  true,  true, false, false,  MG_FIELD,     150,   9, MF_LINGER_ANIM},
-    {"matrix",   "digital rain with white-hot glyph heads",         build_matrix,   true,  true,  true,  false, false, false, true,  MG_FIELD,     140,  -8, MF_NONE},
-    {"pipes",    "water pressure networks, pulses racing runs",     build_pipes,    false, true,  false, false, false, false, false, MG_CONNECTOR, 180,   2, MF_TOPOLOGY},
-    {"mondrian", "painted plazas split by charcoal rules",          build_mondrian, true,  true,  true,  false, false, false, true,  MG_FIELD,     400,   4, MF_NONE},
-    {"koi",      "pond bands, koi gliding between lily pads",       build_koi,      true,  true,  true,  false, false, false, true,  MG_FIELD,     250,  -1, MF_NONE},
-    {"lava",     "crusting basalt over a molten breath",            build_lava,     true,  false, true,  true,  true, false, false,  MG_FIELD,     130, -12, MF_NONE},
-    {"sakura",   "spring night, blossom petals drifting down",      build_sakura,   true,  false, true,  true,  false, false, false, MG_FIELD,     120,   3, MF_NONE},
-    {"geode",    "crystal cavern facets with wandering glints",     build_geode,    true,  true,  true,  false, false, false, true,  MG_FIELD,     160,   8, MF_NONE},
-    {"lantern",  "festival sky, lanterns rising past the stars",    build_lantern,  true,  false, true,  true,  true, false, false,  MG_FIELD,     220,  11, MF_NONE},
-    {"dunes",    "heat shimmer under a fixed blazing sun",          build_dunes,    true,  false, true,  true,  false, false, false, MG_FIELD,     200,  -4, MF_NONE},
-    {"reef",     "caustic water, coral, bubbles, a fish school",    build_reef,     true,  false, true,  true,  false, false, false, MG_FIELD,     160,   1, MF_NONE},
-    {"stained",  "jewel-glass panes, lead lines, roaming light",    build_stained,  true,  true,  true,  false, false, false, true,  MG_FIELD,     300,   6, MF_NONE},
-    {"streets",  "arterial grid, lanes, signals, intersections",    build_streets,  false, false, false, false, false, true, false,  MG_CONNECTOR, 170,  -8, MF_TOPOLOGY},
-    {"neurons",  "branching dendrites with travelling potentials",  build_neurons,  false, true,  false, false, false, true, false,  MG_CONNECTOR,  95,  14, MF_TOPOLOGY},
-    {"mycelium", "living root networks, knots, drifting spores",    build_mycelium, false, true,  false, false, false, true, false,  MG_CONNECTOR, 260,  -9, MF_TOPOLOGY},
-    {"delta",    "tidal estuary channels, confluences, sandbars",   build_delta,    false, false, false, false, false, true, false,  MG_CONNECTOR, 145,  -1, MF_TOPOLOGY},
-    {"storm",    "thunderhead anvils, rain veils, forked lightning", build_storm,    true,  false, true,  true,  false, false, true,  MG_FIELD,     110, -11, MF_LINGER_ANIM},
-    {"glacier",  "blue ice shelves split by crevasses and glints",   build_glacier,  true,  false, true,  true,  true,  false, true,  MG_FIELD,     280,  10, MF_NONE},
-    {"bamboo",   "swaying stalks and nodes under a lit canopy",      build_bamboo,   true,  false, true,  true,  false, false, false, MG_FIELD,     130,  12, MF_LINGER_ANIM},
-    {"solar",    "granulated photosphere, sunspots, arcing flares",  build_solar,    true,  true,  true,  false, false, false, true,  MG_FIELD,     100,  15, MF_LINGER_ANIM},
-    {"rail",     "marshalling yard, running trains, switch lamps",   build_rail,     false, false, false, false, false, true, false,  MG_CONNECTOR, 155,  -6, MF_TOPOLOGY},
-    {"canyon",   "banded strata, a river cut, dust in the light",    build_canyon,   true,  false, true,  true,  false, false, false, MG_FIELD,     240,   7, MF_NONE},
-    {"vinyl",    "concentric grooves under a sweeping highlight",    build_vinyl,    true,  true,  true,  false, false, false, false, MG_FIELD,      90,   2, MF_LINGER_ANIM},
-    {"loom",     "warp and weft crossing over and under on the web", build_loom,     false, false, false, false, false, false, false, MG_CONNECTOR, 320,   5, MF_NONE},
-    {"tide",     "moon-pulled channels, foam lines, and tidal glow",  build_tide,     true,  true,  true,  false, false, false, true,  MG_FIELD,     150, -15, MF_LINGER_ANIM},
-    {"marble",   "veined stone, cool depth, and polished highlights",  build_marble,   true,  true,  true,  false, false, false, true,  MG_FIELD,     270, -14, MF_NONE},
-    {"cinder",   "charred strata, ember faults, and ash drift",        build_cinder,   true,  false, true,  true,  false, false, false, MG_FIELD,     115,  13, MF_LINGER_ANIM},
-    {"origami",  "folded paper planes catching a roaming sun",         build_origami,  true,  true,  true,  false, false, false, true,  MG_FIELD,     210,  16, MF_NONE},
+    {WFC_MODE_CIRCUIT,  "circuit",  "rainbow circuit boards, signals racing traces",   build_circuit,  false, true,  false, false, false, false, false, MG_CONNECTOR, 140,   0, MF_TOPOLOGY},
+    {WFC_MODE_TERRAIN,  "terrain",  "hillshaded biomes + carved rivers + day cycle",   build_terrain,  true,  true,  true,  false, false, false, false, MG_FIELD,     260,  -2, MF_NONE},
+    {WFC_MODE_TRUCHET,  "truchet",  "woven arcs with a travelling light pulse",        build_truchet,  false, false, false, false, false, false, false, MG_CONNECTOR, 500,   7, MF_TOPOLOGY},
+    {WFC_MODE_FIRE,     "fire",     "living flames with rising embers",                build_fire,     true,  false, true,  true,  false, false, false, MG_FIELD,      90,  -3, MF_LINGER_ANIM},
+    {WFC_MODE_WAVES,    "waves",    "rolling ocean, crest lines, moonpath",            build_waves,    true,  true,  true,  false, false, false, true,  MG_FIELD,     160,  -5, MF_LINGER_ANIM},
+    {WFC_MODE_DUNGEON,  "dungeon",  "torch-lit catacombs with breathing warmth",       build_dungeon,  false, true,  false, false, false, false, false, MG_CARVE,     220, -10, MF_TOPOLOGY},
+    {WFC_MODE_MAZE,     "maze",     "labyrinth with wall pulses",                      build_maze,     false, true,  false, false, false, false, false, MG_CARVE,     360,  -7, MF_TOPOLOGY},
+    {WFC_MODE_GALAXY,   "galaxy",   "nebulae with shooting stars",                     build_galaxy,   true,  true,  true,  false, false, false, true,  MG_FIELD,     100,   5, MF_LINGER_ANIM},
+    {WFC_MODE_CITY,     "city",     "night skylines with beacons + rain",              build_city,     true,  false, true,  true,  false, false, false, MG_FIELD,     400,  -6, MF_LINGER_ANIM},
+    {WFC_MODE_AURORA,   "aurora",   "drifting green curtains over stars",              build_aurora,   true,  false, true,  true,  true, false, false,  MG_FIELD,     150,   9, MF_LINGER_ANIM},
+    {WFC_MODE_MATRIX,   "matrix",   "digital rain with white-hot glyph heads",         build_matrix,   true,  true,  true,  false, false, false, true,  MG_FIELD,     140,  -8, MF_NONE},
+    {WFC_MODE_PIPES,    "pipes",    "water pressure networks, pulses racing runs",     build_pipes,    false, true,  false, false, false, false, false, MG_CONNECTOR, 180,   2, MF_TOPOLOGY},
+    {WFC_MODE_MONDRIAN, "mondrian", "painted plazas split by charcoal rules",          build_mondrian, true,  true,  true,  false, false, false, true,  MG_FIELD,     400,   4, MF_NONE},
+    {WFC_MODE_KOI,      "koi",      "pond bands, koi gliding between lily pads",       build_koi,      true,  true,  true,  false, false, false, true,  MG_FIELD,     250,  -1, MF_NONE},
+    {WFC_MODE_LAVA,     "lava",     "crusting basalt over a molten breath",            build_lava,     true,  false, true,  true,  true, false, false,  MG_FIELD,     130, -12, MF_NONE},
+    {WFC_MODE_SAKURA,   "sakura",   "spring night, blossom petals drifting down",      build_sakura,   true,  false, true,  true,  false, false, false, MG_FIELD,     120,   3, MF_NONE},
+    {WFC_MODE_GEODE,    "geode",    "crystal cavern facets with wandering glints",     build_geode,    true,  true,  true,  false, false, false, true,  MG_FIELD,     160,   8, MF_NONE},
+    {WFC_MODE_LANTERN,  "lantern",  "festival sky, lanterns rising past the stars",    build_lantern,  true,  false, true,  true,  true, false, false,  MG_FIELD,     220,  11, MF_NONE},
+    {WFC_MODE_DUNES,    "dunes",    "heat shimmer under a fixed blazing sun",          build_dunes,    true,  false, true,  true,  false, false, false, MG_FIELD,     200,  -4, MF_NONE},
+    {WFC_MODE_REEF,     "reef",     "caustic water, coral, bubbles, a fish school",    build_reef,     true,  false, true,  true,  false, false, false, MG_FIELD,     160,   1, MF_NONE},
+    {WFC_MODE_STAINED,  "stained",  "jewel-glass panes, lead lines, roaming light",    build_stained,  true,  true,  true,  false, false, false, true,  MG_FIELD,     300,   6, MF_NONE},
+    {WFC_MODE_STREETS,  "streets",  "arterial grid, lanes, signals, intersections",    build_streets,  false, false, false, false, false, true, false,  MG_CONNECTOR, 170,  -8, MF_TOPOLOGY},
+    {WFC_MODE_NEURONS,  "neurons",  "branching dendrites with travelling potentials",  build_neurons,  false, true,  false, false, false, true, false,  MG_CONNECTOR,  95,  14, MF_TOPOLOGY},
+    {WFC_MODE_MYCELIUM, "mycelium", "living root networks, knots, drifting spores",    build_mycelium, false, true,  false, false, false, true, false,  MG_CONNECTOR, 260,  -9, MF_TOPOLOGY},
+    {WFC_MODE_DELTA,    "delta",    "tidal estuary channels, confluences, sandbars",   build_delta,    false, false, false, false, false, true, false,  MG_CONNECTOR, 145,  -1, MF_TOPOLOGY},
+    {WFC_MODE_STORM,    "storm",    "thunderhead anvils, rain veils, forked lightning", build_storm,    true,  false, true,  true,  false, false, true,  MG_FIELD,     110, -11, MF_LINGER_ANIM},
+    {WFC_MODE_GLACIER,  "glacier",  "blue ice shelves split by crevasses and glints",   build_glacier,  true,  false, true,  true,  true,  false, true,  MG_FIELD,     280,  10, MF_NONE},
+    {WFC_MODE_BAMBOO,   "bamboo",   "swaying stalks and nodes under a lit canopy",      build_bamboo,   true,  false, true,  true,  false, false, false, MG_FIELD,     130,  12, MF_LINGER_ANIM},
+    {WFC_MODE_SOLAR,    "solar",    "granulated photosphere, sunspots, arcing flares",  build_solar,    true,  true,  true,  false, false, false, true,  MG_FIELD,     100,  15, MF_LINGER_ANIM},
+    {WFC_MODE_RAIL,     "rail",     "marshalling yard, running trains, switch lamps",   build_rail,     false, false, false, false, false, true, false,  MG_CONNECTOR, 155,  -6, MF_TOPOLOGY},
+    {WFC_MODE_CANYON,   "canyon",   "banded strata, a river cut, dust in the light",    build_canyon,   true,  false, true,  true,  false, false, false, MG_FIELD,     240,   7, MF_NONE},
+    {WFC_MODE_VINYL,    "vinyl",    "concentric grooves under a sweeping highlight",    build_vinyl,    true,  true,  true,  false, false, false, false, MG_FIELD,      90,   2, MF_LINGER_ANIM},
+    {WFC_MODE_LOOM,     "loom",     "warp and weft crossing over and under on the web", build_loom,     false, false, false, false, false, false, false, MG_CONNECTOR, 320,   5, MF_NONE},
+    {WFC_MODE_TIDE,     "tide",     "moon-pulled channels, foam lines, and tidal glow",  build_tide,     true,  true,  true,  false, false, false, true,  MG_FIELD,     150, -15, MF_LINGER_ANIM},
+    {WFC_MODE_MARBLE,   "marble",   "veined stone, cool depth, and polished highlights",  build_marble,   true,  true,  true,  false, false, false, true,  MG_FIELD,     270, -14, MF_NONE},
+    {WFC_MODE_CINDER,   "cinder",   "charred strata, ember faults, and ash drift",        build_cinder,   true,  false, true,  true,  false, false, false, MG_FIELD,     115,  13, MF_LINGER_ANIM},
+    {WFC_MODE_ORIGAMI,  "origami",  "folded paper planes catching a roaming sun",         build_origami,  true,  true,  true,  false, false, false, true,  MG_FIELD,     210,  16, MF_NONE},
 };
 #define NMODES ((int)(sizeof MODESPEC / sizeof *MODESPEC))
 static int g_mode_idx = 0;
@@ -132,6 +134,18 @@ static const char *mode_name(void);
 static int g_user_w = 999, g_user_h = 999;
 static const ModeSpec *mode_spec(void) { return &MODESPEC[g_mode_idx]; }
 static const char *mode_name(void) { return MODESPEC[g_mode_idx].name; }
+static WfcModeId mode_id(void) { return MODESPEC[g_mode_idx].id; }
+static bool mode_is(WfcModeId id) { return mode_id() == id; }
+static bool mode_registry_valid(void) {
+    if (NMODES != WFC_MODE_COUNT) return false;
+    for (int i = 0; i < NMODES; i++) {
+        if (MODESPEC[i].id != (WfcModeId)i ||
+            !wfc_mode_id_valid(MODESPEC[i].id) ||
+            strcmp(MODESPEC[i].name, wfc_mode_name(MODESPEC[i].id)))
+            return false;
+    }
+    return true;
+}
 static bool g_fullscreen = false;
 static uint64_t g_seed = 0;
 static bool g_seed_set = false;
@@ -169,6 +183,8 @@ static int g_loot = 0, g_loot_tot = 0;
 static char g_collage_path[512] = {0};
 static char g_report_path[512] = {0};
 static char g_world_path[512] = "/tmp/wfc_world.bin";
+static bool g_session_enabled = false;
+static char g_session_meta_path[512] = {0};
 static int g_zoom = 1;
 static int g_evolve_count = 0;
 static bool g_heatmap = false;
@@ -188,6 +204,8 @@ static void macro_build(void);
 static double quality_clamp(double v);
 static double quality_signed_clamp(double v);
 static bool evolution_run(int requested);
+static bool studio_session_save(void);
+static bool studio_session_load(void);
 static int g_inf_ax = 0, g_inf_ay = 0;
 static uint32_t *prev_sig_ = NULL;
 static size_t prev_sig_cap_ = 0;
@@ -220,6 +238,48 @@ static bool g_picker = false;          /* the world picker overlay */
 static bool g_picker_was_paused = false;
 static int g_picker_sel = 0;
 static char g_picker_query[24] = "";
+#define RECENT_MODE_COUNT 6
+static int g_recent_modes[RECENT_MODE_COUNT];
+static int g_recent_mode_count = 0;
+static uint64_t g_favorite_modes = 0;
+static bool mode_favorite(int index) {
+    return index >= 0 && index < NMODES &&
+           (g_favorite_modes & (UINT64_C(1) << index)) != 0;
+}
+static bool mode_recent(int index) {
+    for (int i = 0; i < g_recent_mode_count; i++)
+        if (g_recent_modes[i] == index) return true;
+    return false;
+}
+static void mode_recent_push(int index) {
+    if (index < 0 || index >= NMODES) return;
+    int at = 0;
+    while (at < g_recent_mode_count && g_recent_modes[at] != index) at++;
+    if (at < g_recent_mode_count)
+        memmove(&g_recent_modes[at], &g_recent_modes[at + 1],
+                (size_t)(g_recent_mode_count - at - 1) * sizeof g_recent_modes[0]);
+    else if (g_recent_mode_count < RECENT_MODE_COUNT)
+        g_recent_mode_count++;
+    else
+        memmove(&g_recent_modes[0], &g_recent_modes[1],
+                (RECENT_MODE_COUNT - 1) * sizeof g_recent_modes[0]);
+    g_recent_modes[0] = index;
+}
+static void mode_favorite_toggle(int index) {
+    if (index < 0 || index >= NMODES) return;
+    g_favorite_modes ^= UINT64_C(1) << index;
+}
+static void mode_recent_csv(char *out, size_t cap) {
+    if (!out || !cap) return;
+    out[0] = 0;
+    for (int i = 0; i < g_recent_mode_count; i++) {
+        size_t used = strlen(out);
+        if (used >= cap) break;
+        int n = snprintf(out + used, cap - used, "%s%s",
+                         i ? "," : "", MODESPEC[g_recent_modes[i]].name);
+        if (n < 0 || (size_t)n >= cap - used) { out[0] = 0; return; }
+    }
+}
 static bool g_observe = false;
 static bool g_observe_was_paused = false;
 static volatile sig_atomic_t g_winch = 0;
@@ -1367,27 +1427,17 @@ static int weighted_pick_at(uint64_t m, int cell) {
 
 /* propagate constraints outward from cell; false on contradiction */
 static bool propagate_from(int start) {
-    int sp = 0;
-    stk_[sp++] = start;
-    while (sp) {
-        int c = stk_[--sp];
-        int cx = c % W_, cy = c / W_;
-        for (int d = 0; d < NDIR; d++) {
-            int nx = cx, ny = cy;
-            if (d == 0) ny = g_torus ? (cy + H_ - 1) % H_ : cy - 1;
-            else if (d == 1) nx = g_torus ? (cx + 1) % W_ : cx + 1;
-            else if (d == 2) ny = g_torus ? (cy + 1) % H_ : cy + 1;
-            else nx = g_torus ? (cx + W_ - 1) % W_ : cx - 1;
-            if (nx < 0 || ny < 0 || nx >= W_ || ny >= H_) continue;
-            int n = IDX(nx, ny);
-            uint64_t allow = 0, dm = dom_[c];
-            while (dm) { allow |= cdir_[d][__builtin_ctzll(dm)]; dm &= dm - 1; }
-            uint64_t nd = dom_[n] & allow;
-            if (!nd) return false;
-            if (nd != dom_[n]) { dom_[n] = nd; stk_[sp++] = n; }
-        }
-    }
-    return true;
+    WfcSolver solver = {
+        .domains = dom_,
+        .stack = stk_,
+        .stack_capacity = (size_t)W_ * (size_t)H_ * MAXT,
+        .width = W_,
+        .height = H_,
+        .tile_count = (unsigned)ntiles_,
+        .torus = g_torus,
+        .compatibility = cdir_,
+    };
+    return wfc_solver_propagate(&solver, start);
 }
 
 /* collapse lowest-entropy cell, propagate constraints outward.
@@ -1475,35 +1525,18 @@ typedef struct {
     double topology;
 } QualityMetrics;
 
-typedef struct {
-    const char *focus;
-    double validity, boundary, coverage, diversity;
-    double smoothness, stability, topology;
-} QualityProfile;
+typedef WfcQualityProfile QualityProfile;
 
 static QualityProfile quality_profile(void) {
-    const char *m = mode_name();
-    if (!strcmp(m, "streets"))
-        return (QualityProfile){"streets", 0.30, 0.18, 0.14, 0.08, 0.08, 0.06, 0.16};
-    if (!strcmp(m, "neurons"))
-        return (QualityProfile){"neurons", 0.24, 0.05, 0.12, 0.15, 0.08, 0.06, 0.30};
-    if (!strcmp(m, "mycelium"))
-        return (QualityProfile){"mycelium", 0.24, 0.04, 0.16, 0.14, 0.12, 0.06, 0.24};
-    if (!strcmp(m, "delta"))
-        return (QualityProfile){"delta", 0.27, 0.12, 0.14, 0.08, 0.10, 0.05, 0.24};
-    if (!strcmp(m, "rail"))
-        return (QualityProfile){"rail", 0.30, 0.16, 0.14, 0.07, 0.09, 0.06, 0.18};
-    return (QualityProfile){"balanced", 0.30, 0.03, 0.18, 0.16, 0.16, 0.05, 0.12};
+    return wfc_quality_profile_for_mode(mode_name());
 }
 
 static double quality_clamp(double v) {
-    if (!isfinite(v)) return 0.0;
-    return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v;
+    return wfc_quality_clamp(v);
 }
 
 static double quality_signed_clamp(double v) {
-    if (!isfinite(v)) return 0.0;
-    return v < -1.0 ? -1.0 : v > 1.0 ? 1.0 : v;
+    return wfc_quality_signed_clamp(v);
 }
 
 static bool quality_network_mode(void) {
@@ -1701,24 +1734,21 @@ static QualityMetrics quality_measure(bool final_map) {
     } else if (!active) {
         q.topology = decided ? 0.15 : 0.0;
     } else {
-        const char *m = mode_name();
-        double ideal = !strcmp(m, "streets") ? 2.1 :
-                       !strcmp(m, "neurons") ? 1.8 :
-                       !strcmp(m, "mycelium") ? 1.6 :
-                       !strcmp(m, "delta") ? 1.9 : 1.8;
+        double ideal = mode_is(WFC_MODE_STREETS) ? 2.1 :
+                       mode_is(WFC_MODE_NEURONS) ? 1.8 :
+                       mode_is(WFC_MODE_MYCELIUM) ? 1.6 :
+                       mode_is(WFC_MODE_DELTA) ? 1.9 : 1.8;
         double balance = quality_clamp(1.0 - fabs(degree_sum / active - ideal) / 3.0);
         double active_ratio = quality_clamp((double)active / (double)(decided ? decided : 1));
         q.topology = quality_clamp(0.42 * balance + 0.34 * active_ratio +
                                    0.24 * macro_coherence());
     }
     QualityProfile profile = quality_profile();
-    q.total = quality_clamp(profile.validity * q.validity +
-                            profile.boundary * q.boundary +
-                            profile.coverage * q.coverage +
-                            profile.diversity * q.diversity +
-                            profile.smoothness * q.smoothness +
-                            profile.stability * q.stability +
-                            profile.topology * q.topology);
+    WfcQualityComponents components = {
+        q.validity, q.boundary, q.coverage, q.diversity,
+        q.smoothness, q.stability, q.topology,
+    };
+    q.total = wfc_quality_score(profile, components);
     return q;
 }
 

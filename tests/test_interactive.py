@@ -155,12 +155,25 @@ class InteractiveTests(unittest.TestCase):
         filtered = self.session.send_until(
             b"#network", lambda o: "search: #network" in plain(o) and "rail" in plain(o),
         )
-        text = last_screen(filtered)
-        self.assertIn("streets", text)
-        self.assertIn("rail", text)
-        self.assertNotIn("tide", text)
-        self.assertIn("#field", text)
-        self.assertIn("#animated", text)
+        stream = plain(filtered)
+        self.assertIn("streets", stream)
+        self.assertIn("rail", stream)
+        self.assertNotIn("tide", stream)
+        self.assertIn("#field", stream)
+        self.assertIn("#animated", stream)
+        self.assertIn("5/37 worlds", stream)
+
+    def test_picker_favorites_are_filterable(self):
+        self.session = Session()
+        self.session.send_until(b"/", lambda o: "PICK A WORLD" in plain(o))
+        self.session.send(b"F")
+        filtered = self.session.send_until(
+            b"#favorite",
+            lambda o: "search: #favorite" in plain(o) and "1/37 worlds" in plain(o),
+        )
+        stream = plain(filtered)
+        self.assertIn("1/37 worlds", stream)
+        self.assertIn("circuit", stream)
 
     def test_help_explains_the_first_three_interactions(self):
         self.session = Session()

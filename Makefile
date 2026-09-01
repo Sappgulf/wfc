@@ -3,28 +3,29 @@ CFLAGS ?= -O2 -std=c11 -Wall -Wextra
 LDLIBS = -lz
 
 # wfc's main program is one translation unit: wfc.c includes these parts in
-# order. wfc_core.c is the small independent invariant module. The files are
-# listed here so editing one triggers a rebuild.
+# order. The small dependency-free modules below provide testable seams. The
+# files are listed here so editing one triggers a rebuild.
 PARTS = wfc_world.h wfc_render.h wfc_export.h wfc_audio.h wfc_thermo.h wfc_ui.h
-CORE = wfc_core.c wfc_core.h
+MODULES = wfc_core.c wfc_mode.c wfc_platform.c wfc_quality.c wfc_solver.c
+HEADERS = wfc_core.h wfc_mode.h wfc_platform.h wfc_quality.h wfc_solver.h
 
-wfc: wfc.c $(PARTS) $(CORE)
-	$(CC) $(CFLAGS) -o $@ $< wfc_core.c $(LDLIBS)
+wfc: wfc.c $(PARTS) $(MODULES) $(HEADERS)
+	$(CC) $(CFLAGS) -o $@ $< $(MODULES) $(LDLIBS)
 
 # sanitizer build: ./wfc with ASan+UBSan reporting
-wfc_asan: wfc.c $(PARTS) $(CORE)
+wfc_asan: wfc.c $(PARTS) $(MODULES) $(HEADERS)
 	$(CC) -O1 -g -std=c11 -Wall -Wextra -fsanitize=address,undefined \
-		-fno-omit-frame-pointer -o wfc_asan $< wfc_core.c $(LDLIBS)
+		-fno-omit-frame-pointer -o wfc_asan $< $(MODULES) $(LDLIBS)
 
 asan: wfc_asan
 
 # pedantic warning sweep: must compile with zero output
-strict: wfc.c $(PARTS) $(CORE)
+strict: wfc.c $(PARTS) $(MODULES) $(HEADERS)
 	$(CC) -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
-		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /dev/null $< wfc_core.c $(LDLIBS)
+		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /dev/null $< $(MODULES) $(LDLIBS)
 
-debug: wfc.c $(PARTS) $(CORE)
-	$(CC) -O0 -g -std=c11 -Wall -Wextra -o wfc_debug $< wfc_core.c $(LDLIBS)
+debug: wfc.c $(PARTS) $(MODULES) $(HEADERS)
+	$(CC) -O0 -g -std=c11 -Wall -Wextra -o wfc_debug $< $(MODULES) $(LDLIBS)
 
 test: wfc
 	@set -e; for m in $$(./wfc --list-modes); do \
@@ -62,7 +63,8 @@ python-check:
 		tests/test_quality_studio.py tests/quality_benchmark.py tests/test_quality_benchmark.py \
 		tests/test_interactive.py tests/test_docs.py tests/test_fuzz_headless.py \
 		tests/test_cli_features.py tests/test_performance_gate.py tests/fuzz_headless.py \
-		tests/performance_gate.py tests/thermo_sweep.py
+		tests/performance_gate.py tests/thermo_sweep.py tests/doctor.py \
+		tests/test_graphics_audio.py
 	@echo 'python: syntax OK'
 
 protocol-check:
@@ -95,7 +97,7 @@ interactive-check: wfc
 studio-c-check:
 	@cc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
 		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /tmp/wfc_studio_test \
-		tests/test_wfc_studio.c wfc_core.c -lz
+		tests/test_wfc_studio.c $(MODULES) -lz
 	@/tmp/wfc_studio_test
 
 core-check:
@@ -107,6 +109,32 @@ core-check:
 
 quality-benchmark: wfc
 	@python3 tests/quality_benchmark.py --binary ./wfc --trials 2 --w 8 --h 6
+
+module-check:
+	@cc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes \
+		-Wmissing-prototypes -Wcast-align -Wwrite-strings -o /tmp/wfc_module_test \
+		tests/test_wfc_modules.c wfc_mode.c wfc_platform.c wfc_quality.c wfc_solver.c -lm
+	@/tmp/wfc_module_test
+	@echo 'modules: mode, platform, solver, and quality contracts OK'
+
+doctor: wfc
+	@python3 tests/doctor.py --binary ./wfc
+
+graphics-smoke: wfc
+	@python3 tests/test_graphics_audio.py --graphics --binary ./wfc
+
+audio-smoke: wfc
+	@python3 tests/test_graphics_audio.py --audio --binary ./wfc
+
+large-benchmark: wfc
+	@./wfc --bench --w 48 --h 30 >/tmp/wfc-large-benchmark.txt
+	@test "$$(wc -l </tmp/wfc-large-benchmark.txt | tr -d ' ')" -ge 38
+	@tail -n 38 /tmp/wfc-large-benchmark.txt
+
+thermo-env:
+	@python3 -m venv .venv-thermo
+	@.venv-thermo/bin/python -m pip install -r requirements-thermo.lock
+	@echo 'thermo-env: ready; run WFC_PYTHON=.venv-thermo/bin/python ./wfc --solver thermo'
 
 performance-check: wfc
 	@python3 -m unittest tests.test_quality_benchmark tests.test_performance_gate -v
@@ -146,11 +174,20 @@ sweep: wfc_asan
 fuzz: wfc wfc_asan
 	@python3 tests/fuzz_headless.py --binary ./wfc_asan --runs 50 --seed 20260831
 
-# everything a change has to survive before it lands
-check: strict test regression python-check protocol-check bridge-check \
-	   learning-check quality-check studio-check studio-c-check \
-	   core-check docs-check cli-check thermo-check interactive-check \
-	   interactive-asan-check performance-check perf-check quality-benchmark sweep fuzz
+# fast feedback: compile, deterministic contracts, and focused unit suites
+check-fast: strict test regression python-check protocol-check bridge-check \
+	   learning-check studio-c-check module-check core-check docs-check cli-check
+	@echo "check-fast: all suites clean"
+
+# full release gate: fast feedback plus quality, interactive, sanitizer,
+# graphics/audio contracts, and a larger 48x30 benchmark.
+check-full: check-fast quality-check studio-check thermo-check interactive-check \
+	   interactive-asan-check performance-check perf-check quality-benchmark \
+	   large-benchmark graphics-smoke audio-smoke sweep fuzz doctor
+	@echo "check-full: all suites clean"
+
+# Backwards-compatible default for local contributors and CI callers.
+check: check-full
 	@echo "check: all suites clean"
 
 clean:
@@ -159,4 +196,8 @@ clean:
 install: wfc
 	install -m 0755 wfc /usr/local/bin/wfc
 
-.PHONY: check clean install asan strict debug test regression python-check protocol-check bridge-check learning-check quality-check studio-check studio-c-check core-check docs-check cli-check thermo-check interactive-check interactive-asan-check performance-check perf-check quality-benchmark sweep fuzz
+.PHONY: check check-fast check-full clean install asan strict debug test regression \
+	python-check protocol-check bridge-check learning-check quality-check studio-check \
+	studio-c-check module-check core-check docs-check cli-check thermo-check \
+	interactive-check interactive-asan-check performance-check perf-check \
+	quality-benchmark large-benchmark thermo-env graphics-smoke audio-smoke doctor sweep fuzz

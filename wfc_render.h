@@ -4,7 +4,7 @@
  * every world's render branch, zen dissolves, the raymarcher and iso view
  *
  * wfc is deliberately one translation unit: wfc.c includes these parts in
- * order, so `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz` still builds the whole thing
+ * order, so `make` still builds the whole thing
  * with no build system. They are cut at the section boundaries that were
  * already there, in the order the compiler saw them, so the token stream is
  * unchanged -- these are not independent modules and have no include guards
@@ -585,9 +585,7 @@ static double g_clock_frozen_ms = 0;
 
 static double now_ms(void) {
     if (g_clock_frozen) return g_clock_frozen_ms;
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+    return wfc_platform_now_ms();
 }
 
 static void clock_freeze_for_export(void) {

@@ -16,13 +16,14 @@ WORLD_HASH_OFFSET = 1469598103934665603
 WORLD_HASH_PRIME = 1099511628211
 
 
-def write_world_fixture(path):
+def write_world_fixture(path, *, mode=0, ntiles=14, domains=(1, 1, 1, 1), pins=((0, 0),)):
     body = struct.pack(
-        "<IIIIQII", 0, 2, 2, 14, 0x0102030405060708, 500, 4,
+        "<IIIIQII", mode, 2, 2, ntiles, 0x0102030405060708, 500, 4,
     )
-    body += struct.pack("<QQQQ", 1, 2, 4, 8)
-    body += struct.pack("<I", 1)
-    body += struct.pack("<II", 2, 2)
+    body += struct.pack("<QQQQ", *domains)
+    body += struct.pack("<I", len(pins))
+    for cell, tile in pins:
+        body += struct.pack("<II", cell, tile)
     checksum = WORLD_HASH_OFFSET
     for byte in body:
         checksum = ((checksum ^ byte) * WORLD_HASH_PRIME) & ((1 << 64) - 1)
@@ -68,13 +69,18 @@ class CliFeatureTests(unittest.TestCase):
             self.assertTrue(outputs["png"].read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
             self.assertTrue(outputs["bmp"].read_bytes().startswith(b"BM"))
             self.assertTrue(outputs["gif"].read_bytes().startswith(b"GIF89a"))
-            self.assertIn("circuit", outputs["gallery"].read_text(encoding="utf-8"))
+            gallery = outputs["gallery"].read_text(encoding="utf-8")
+            self.assertIn("circuit", gallery)
+            self.assertIn("id='filter'", gallery)
+            self.assertIn("data-quality=", gallery)
+            self.assertIn("sort.value", gallery)
             self.assertTrue(outputs["collage"].read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_help_names_the_world_inspector(self):
         result = self.run_wfc("--help")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--inspect-world FILE", result.stdout)
+        self.assertIn("--session FILE", result.stdout)
 
     def test_inspect_world_reports_metadata_and_rejects_tampering(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,6 +114,61 @@ class CliFeatureTests(unittest.TestCase):
             result = self.run_wfc("--inspect-world", os.fspath(tampered_path))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("invalid world snapshot", result.stderr)
+
+    def test_inspect_world_rejects_checksum_valid_but_incompatible_domains(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            invalid = Path(tmp) / "incompatible.wfc"
+            # Circuit tile 1 exposes a west edge while its left neighbour is
+            # tile 0, so this state is semantically invalid despite a valid
+            # checksum and in-range domain masks.
+            write_world_fixture(invalid, domains=(1, 2, 1, 1), pins=())
+            result = self.run_wfc("--inspect-world", os.fspath(invalid))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid world snapshot", result.stderr)
+
+    def test_inspect_world_rejects_checksum_valid_connector_border_violation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            invalid = Path(tmp) / "out-of-frame.wfc"
+            # streets is a bounded connector world; tile 1 has horizontal
+            # edges and cannot occupy every cell on a 2x2 outer border.
+            write_world_fixture(invalid, mode=21, domains=(2, 2, 2, 2), pins=())
+            result = self.run_wfc("--inspect-world", os.fspath(invalid))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid world snapshot", result.stderr)
+
+    def test_artifact_paths_fail_before_work_when_empty_or_too_long(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            too_long = os.fspath(Path(tmp) / ("x" * 600))
+            cases = (
+                ("--save", ("--mode", "fire", "--w", "8", "--h", "6", "--once")),
+                ("--gif", ("--mode", "fire", "--w", "8", "--h", "6", "--once")),
+                ("--gallery", ()),
+                ("--collage", ()),
+            )
+            for option, prefix in cases:
+                for path in ("", too_long):
+                    result = self.run_wfc(*prefix, option, path, timeout=5)
+                    self.assertEqual(result.returncode, 2,
+                                     "%s accepted path %r: %s" %
+                                     (option, path, result.stderr))
+                    self.assertIn("invalid value for %s" % option, result.stderr)
+
+    def test_export_replaces_symlink_without_following_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sentinel = root / "sentinel.png"
+            sentinel.write_bytes(b"keep me")
+            output = root / "map.png"
+            output.symlink_to(sentinel)
+            result = self.run_wfc(
+                "--mode", "fire", "--seed", "9", "--w", "8", "--h", "6",
+                "--once", "--save", os.fspath(output),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(sentinel.read_bytes(), b"keep me")
+            self.assertFalse(output.is_symlink())
+            self.assertTrue(output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(list(root.glob("*.tmp.*")), [])
 
 
 if __name__ == "__main__":

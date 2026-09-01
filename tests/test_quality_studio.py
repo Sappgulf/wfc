@@ -68,6 +68,8 @@ class QualityStudioTests(unittest.TestCase):
             self.assertEqual(payload["seed"], 7)
             self.assertEqual(payload["dimensions"], {"w": 8, "h": 6})
             self.assertEqual(payload["solver"], "classic")
+            self.assertEqual(payload["backend"], "classic")
+            self.assertEqual(payload["thermo"]["backend"], "classic")
             self.assertEqual(payload["quality"]["focus"], "delta")
             self.assertEqual(set(payload["quality"]["profile_weights"]), {
                 "validity", "boundary", "coverage", "diversity", "smoothness",
@@ -128,11 +130,13 @@ class QualityStudioTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--report FILE", result.stdout)
         self.assertIn("--world-file FILE", result.stdout)
+        self.assertIn("--session FILE", result.stdout)
         self.assertIn("--inspect-world FILE", result.stdout)
         self.assertIn("l observatory", result.stdout)
         self.assertIn("P pin", result.stdout)
         self.assertIn("Q heatmap", result.stdout)
         self.assertIn("E evolution", result.stdout)
+        self.assertIn("x repair hotspot", result.stdout)
         self.assertIn("--evolve N", result.stdout)
         self.assertIn("--fullscreen", result.stdout)
         self.assertIn("/ pick world", result.stdout)

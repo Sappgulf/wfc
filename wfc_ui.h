@@ -4,7 +4,7 @@
  * the world picker, the observatory and the evolution lab
  *
  * wfc is deliberately one translation unit: wfc.c includes these parts in
- * order, so `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz` still builds the whole thing
+ * order, so `make` still builds the whole thing
  * with no build system. They are cut at the section boundaries that were
  * already there, in the order the compiler saw them, so the token stream is
  * unchanged -- these are not independent modules and have no include guards
@@ -214,6 +214,64 @@ static void world_snapshot_free(WorldSnapshot *snapshot) {
     memset(snapshot, 0, sizeof *snapshot);
 }
 
+/* A valid checksum only proves that the bytes agree with the checksum stored
+ * in the same file.  Rebuild the selected mode's grammar and verify that a
+ * snapshot is also a legal WFC state before exposing it to the live grid. */
+static bool world_snapshot_semantically_valid(const WorldSnapshot *snapshot) {
+    if (!snapshot || !snapshot->domains || snapshot->mode >= (uint32_t)NMODES ||
+        snapshot->w == 0 || snapshot->h == 0 || snapshot->cells == 0)
+        return false;
+
+    int saved_mode = g_mode_idx, saved_w = W_, saved_h = H_;
+    uint64_t saved_seed = g_seed;
+    bool saved_seed_set = g_seed_set;
+    double saved_bias = g_bias;
+    g_seed = snapshot->seed;
+    g_seed_set = true;
+    g_bias = snapshot->bias_milli / 1000.0;
+    setup_mode((int)snapshot->mode);
+    W_ = (int)snapshot->w;
+    H_ = (int)snapshot->h;
+
+    bool valid = ntiles_ == (int)snapshot->ntiles;
+    uint64_t full = valid ? wfc_core_full_mask((unsigned)ntiles_) : 0;
+    for (size_t i = 0; valid && i < snapshot->cells; i++) {
+        uint64_t domain = snapshot->domains[i];
+        uint64_t initial = grid_cell_mask((int)(i % snapshot->w),
+                                           (int)(i / snapshot->w));
+        if (!wfc_core_domain_valid(domain, (unsigned)ntiles_) ||
+            (domain & ~full) || (domain & ~initial)) {
+            valid = false;
+            break;
+        }
+        int x = (int)(i % snapshot->w), y = (int)(i / snapshot->w);
+        for (int d = 0; d < NDIR && valid; d++) {
+            int nx = x, ny = y;
+            if (d == 0) ny = g_torus ? (y + H_ - 1) % H_ : y - 1;
+            else if (d == 1) nx = g_torus ? (x + 1) % W_ : x + 1;
+            else if (d == 2) ny = g_torus ? (y + 1) % H_ : y + 1;
+            else nx = g_torus ? (x + W_ - 1) % W_ : x - 1;
+            if (nx < 0 || ny < 0 || nx >= W_ || ny >= H_) continue;
+            uint64_t neighbor = snapshot->domains[IDX(nx, ny)];
+            uint64_t allowed = 0, choices = domain;
+            while (choices) {
+                int tile = __builtin_ctzll(choices);
+                allowed |= cdir_[d][tile];
+                choices &= choices - 1;
+            }
+            if (!(neighbor & allowed)) valid = false;
+        }
+    }
+
+    g_seed = saved_seed;
+    g_seed_set = saved_seed_set;
+    g_bias = saved_bias;
+    W_ = saved_w;
+    H_ = saved_h;
+    setup_mode(saved_mode);
+    return valid;
+}
+
 static bool world_save_file(const char *path) {
     if (!path || !*path || strlen(path) >= sizeof g_world_path ||
         W_ <= 0 || H_ <= 0 || ntiles_ <= 0 || ntiles_ > MAXT || !dom_ ||
@@ -335,8 +393,10 @@ world_load_fail:
 
 static bool world_inspect_file(const char *path) {
     WorldSnapshot snapshot = {0};
-    if (!world_snapshot_read(path, &snapshot)) {
+    if (!world_snapshot_read(path, &snapshot) ||
+        !world_snapshot_semantically_valid(&snapshot)) {
         fprintf(stderr, "invalid world snapshot: %s\n", path ? path : "(null)");
+        world_snapshot_free(&snapshot);
         return false;
     }
     size_t decided = wfc_core_count_singletons(snapshot.domains, snapshot.cells);
@@ -353,7 +413,11 @@ static bool world_inspect_file(const char *path) {
 
 static bool world_load_file(const char *path) {
     WorldSnapshot snapshot = {0};
-    if (!world_snapshot_read(path, &snapshot)) return false;
+    if (!world_snapshot_read(path, &snapshot) ||
+        !world_snapshot_semantically_valid(&snapshot)) {
+        world_snapshot_free(&snapshot);
+        return false;
+    }
 
     int old_mode = g_mode_idx;
     uint64_t old_seed = g_seed;
@@ -721,6 +785,25 @@ static bool evolution_run(int requested) {
     return true;
 }
 
+/* Re-score the current world with a small seed population. Evolution already
+ * snapshots and replays the studio pins, so this is a safe observatory repair
+ * action: it improves the weakest local quality signal without erasing the
+ * user's authored constraints. */
+static bool repair_hotspot(void) {
+    if (g_thermo) {
+        set_note("repair: turn thermo off first");
+        return false;
+    }
+    if (g_nworlds > 1 || g_inf) {
+        set_note("repair: classic single-world only");
+        return false;
+    }
+    QualityHotspot hotspot = quality_hotspot();
+    if (studio_pin_ && studio_pin_[IDX(hotspot.x, hotspot.y)])
+        set_note("repair: hotspot is pinned; evolution will preserve it");
+    return evolution_run(4);
+}
+
 static void toggle_fullscreen_fit(void) {
     if (g_thermo) thermo_kill();
     g_fullscreen = !g_fullscreen;
@@ -743,7 +826,7 @@ static int pump_keys(bool tty) {
     for (;;) {
         if (pushback >= 0) { key = pushback; pushback = -1; c = (unsigned char)key; }
         else {
-        if (read(STDIN_FILENO, &c, 1) != 1) break;
+        if (wfc_platform_read_input(STDIN_FILENO, &c, 1) != 1) break;
         key = c;
         if (mouse_esc == 1) {
             if (c == '[') { mouse_esc = 2; mouse_len = 0; continue; }
@@ -847,7 +930,9 @@ static int pump_keys(bool tty) {
                 g_picker = false;
                 g_paused = g_picker_was_paused;
                 if (n) {
-                    setup_mode(hits[g_picker_sel < n ? g_picker_sel : 0]);
+                    int chosen = hits[g_picker_sel < n ? g_picker_sel : 0];
+                    setup_mode(chosen);
+                    mode_recent_push(chosen);
                     g_seed = rnd();
                     apply_size();
                     if (g_sound) play_stinger(g_mode_idx);
@@ -855,6 +940,13 @@ static int pump_keys(bool tty) {
                 }
                 full_repaint_ = true;
                 fputs("\x1b[2J", stdout);
+            } else if (c == 'F') {
+                if (n) {
+                    int chosen = hits[g_picker_sel < n ? g_picker_sel : 0];
+                    mode_favorite_toggle(chosen);
+                    set_note("%s %s", mode_favorite(chosen) ? "favorited" : "unfavorited",
+                             MODESPEC[chosen].name);
+                }
             } else if (c == 127 || c == 8) {
                 size_t len = strlen(g_picker_query);
                 if (len) g_picker_query[len - 1] = 0;
@@ -893,6 +985,10 @@ static int pump_keys(bool tty) {
                 g_paused = true;
                 if (g_thermo) set_note("evolution: turn thermo off first");
                 else if (evolution_run(4)) g_evolve_view = true;
+            } else if (c == 'x' || c == 'X') {
+                g_observe = false;
+                g_paused = true;
+                if (repair_hotspot()) req = 1;
             } else if (c == 'F') {
                 toggle_fullscreen_fit();
                 req = 1;
@@ -999,11 +1095,15 @@ static int pump_keys(bool tty) {
         else if (c == 'w' || c == 's' || c == 'd') { }
         else if (c == 'k') { g_crt = !g_crt; set_note("CRT %s", g_crt ? "on" : "off"); }
         else if (c == 'W') {
-            set_note(world_save_file(g_world_path) ? "world saved (%s)" : "save failed (%s)",
+            set_note(studio_session_save() ?
+                     (g_session_enabled ? "session saved (%s)" : "world saved (%s)") :
+                     "save failed (%s)",
                      g_world_path);
         }
         else if (c == 'L') {
-            if (world_load_file(g_world_path)) set_note("world loaded (%d pins)", studio_pin_count_);
+            if (studio_session_load())
+                set_note(g_session_enabled ? "session loaded (%d pins)" : "world loaded (%d pins)",
+                         studio_pin_count_);
             else set_note("load failed or incompatible save");
         }
         else if (c == 'u') {
@@ -1029,9 +1129,16 @@ static int pump_keys(bool tty) {
             if (!rgb2) { set_note("clipboard shot too large"); continue; }
             Buf img2 = png_bytes(rgb2, pw2, ph2);
             free(rgb2);
-            FILE *fp2 = fopen("/tmp/wfc_shot.png", "wb");
-            if (fp2) { fwrite(img2.b, 1, img2.n, fp2); fclose(fp2); }
+            char temp2[ARTIFACT_TEMP_CAP];
+            FILE *fp2 = artifact_open("/tmp/wfc_shot.png", temp2, sizeof temp2);
+            bool shot_ok = false;
+            if (fp2) {
+                bool wrote = fwrite(img2.b, 1, img2.n, fp2) == img2.n;
+                if (wrote) shot_ok = artifact_commit(fp2, temp2, "/tmp/wfc_shot.png");
+                else artifact_abort(fp2, temp2);
+            }
             buf_free(&img2);
+            if (!shot_ok) { set_note("clipboard shot failed"); continue; }
 #ifdef __APPLE__
             system("osascript -e 'set the clipboard to (read (POSIX file \"/tmp/wfc_shot.png\") as class PNGF)' >/dev/null 2>&1");
             set_note("map copied to clipboard");
@@ -1095,7 +1202,7 @@ static int pump_keys(bool tty) {
         }
         else if (c == '+' || c == '=') { if (g_speed < 200000) g_speed *= 2; speed_changed(); set_note("speed %ld steps/s", g_speed); }
         else if (c == '-' || c == '_') { if (g_speed > 1) g_speed /= 2; speed_changed(); set_note("speed %ld steps/s", g_speed); }
-        else if (c == 'm') { setup_mode(g_mode_idx + 1); g_seed = rnd(); g_paused = false; apply_size(); if (g_sound) play_stinger(g_mode_idx); req = 1; }
+        else if (c == 'm') { setup_mode(g_mode_idx + 1); mode_recent_push(g_mode_idx); g_seed = rnd(); g_paused = false; apply_size(); if (g_sound) play_stinger(g_mode_idx); req = 1; }
         else if (c == 's') {
             char path[512];
             if (!g_save_path[0])
@@ -1110,8 +1217,7 @@ static int pump_keys(bool tty) {
 }
 
 static void msleep(double ms) {
-    struct timespec ts = {(time_t)(ms / 1000), (long)((ms / 1000 - (double)(long)(ms / 1000)) * 1e9)};
-    nanosleep(&ts, NULL);
+    (void)wfc_platform_sleep_ms(ms);
 }
 /* sub-ms per-step delays batch up into whole sleeps; nanosleep's real
  * granularity is ~1ms, so sleeping 1us per step caps --speed at ~800/s */

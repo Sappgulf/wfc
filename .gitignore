@@ -15,6 +15,7 @@ wfc_debug.dSYM/
 # runtime state
 .wfcrc
 wfc_world.bin
+.venv-thermo/
 
 # mac junk
 .DS_Store

@@ -7,7 +7,7 @@
  * Extras: gif/png export, terminal pixel rendering (iTerm/kitty/WezTerm),
  * WASD crawler in solved dungeons, and ',' '.' collapse time-scrubbing.
  *
- * build:  cc -O2 -std=c11 -Wall -Wextra -o wfc wfc.c wfc_core.c -lz
+ * build:  make
  * run:    ./wfc
  * keys:   space new map | m mode | +/- speed | p pause | s save PNG | q quit
  *
@@ -37,14 +37,19 @@
 #include <zlib.h>
 
 #include "wfc_core.h"
+#include "wfc_mode.h"
+#include "wfc_platform.h"
+#include "wfc_quality.h"
+#include "wfc_solver.h"
 
 #define MAXT 64
 #define MAXW 4
 #define NDIR 4
 #define OPPOSITE(d) (((d) + 2) & 3)
 
-/* The program is one translation unit, split into parts purely so it can
- * be navigated. Order matters: each part depends on the ones above it. */
+/* The application parts remain one translation unit, split so they can be
+ * navigated. Order matters: each part depends on the ones above it. The
+ * dependency-free seams are linked from the small modules above. */
 #include "wfc_world.h"
 #include "wfc_render.h"
 #include "wfc_export.h"
@@ -53,6 +58,7 @@
 #include "wfc_ui.h"
 
 /* ---------------- main ---------------- */
+#define WFC_VERSION "0.4.0"
 
 static bool parse_long_range(const char *text, long min, long max, long *out) {
     if (!text || !*text) return false;
@@ -110,23 +116,42 @@ static bool parse_seed_value(const char *text, uint64_t *out) {
     return true;
 }
 
+/* All CLI paths are copied into fixed-size buffers.  Silently truncating an
+ * artifact path is worse than rejecting it: the command can report success
+ * while writing to a different file than the caller requested. */
+static bool copy_path_arg(char *dst, size_t cap, const char *value,
+                          const char *option) {
+    if (!dst || cap == 0 || !value || !*value || strlen(value) >= cap) {
+        fprintf(stderr, "invalid value for %s: path must be 1-%zu characters\n",
+                option, cap > 0 ? cap - 1 : 0);
+        return false;
+    }
+    memcpy(dst, value, strlen(value) + 1);
+    return true;
+}
+
 static void pan_camera_tick(void) {
     if (g_pan && W_ > 0) g_vx = (g_vx + 1) % W_;
 }
 
 static int find_mode(const char *name) {
-    if (!name) return -1;
+    WfcModeId id = wfc_mode_id_from_name(name);
+    if (!wfc_mode_id_valid(id)) return -1;
     for (int i = 0; i < NMODES; i++)
-        if (!strcmp(name, MODESPEC[i].name)) return i;
+        if (MODESPEC[i].id == id) return i;
     return -1;
 }
 
-static void cfg_expand(char *out, size_t cap) {
+static bool cfg_expand(char *out, size_t cap) {
+    if (!out || cap == 0) return false;
     const char *h = getenv("HOME");
-    snprintf(out, cap, "%s/.wfcrc", h ? h : "/tmp");
+    if (!h || !*h) h = "/tmp";
+    int n = snprintf(out, cap, "%s/.wfcrc", h);
+    return n >= 0 && (size_t)n < cap;
 }
 static void cfg_load(void) {
-    char p[512]; cfg_expand(p, sizeof p);
+    char p[512];
+    if (!cfg_expand(p, sizeof p)) return;
     FILE *f = fopen(p, "r");
     if (!f) return;
     char line[128];
@@ -160,20 +185,99 @@ static void cfg_load(void) {
         } else if (!strcmp(k, "zen")) {
             long value;
             if (parse_long_range(v, 0, 1, &value)) g_zen = value != 0;
+        } else if (!strcmp(k, "favorites")) {
+            errno = 0;
+            char *end = NULL;
+            unsigned long long value = strtoull(v, &end, 16);
+            if (errno == 0 && end != v && *end == 0)
+                g_favorite_modes = (uint64_t)value & ((UINT64_C(1) << NMODES) - 1);
+        } else if (!strcmp(k, "recent")) {
+            g_recent_mode_count = 0;
+            int loaded[RECENT_MODE_COUNT], loaded_count = 0;
+            for (char *tok = strtok(v, ","); tok; tok = strtok(NULL, ",")) {
+                int mode = find_mode(tok);
+                if (mode >= 0 && loaded_count < RECENT_MODE_COUNT) {
+                    bool duplicate = false;
+                    for (int j = 0; j < loaded_count; j++)
+                        duplicate |= loaded[j] == mode;
+                    if (!duplicate) loaded[loaded_count++] = mode;
+                }
+            }
+            g_recent_mode_count = loaded_count;
+            for (int j = 0; j < loaded_count; j++) g_recent_modes[j] = loaded[j];
         }
     }
     fclose(f);
 }
 static void cfg_save(void) {
-    char p[512]; cfg_expand(p, sizeof p);
-    FILE *f = fopen(p, "w");
+    char p[512];
+    if (!cfg_expand(p, sizeof p)) return;
+    char temp[ARTIFACT_TEMP_CAP];
+    FILE *f = artifact_open(p, temp, sizeof temp);
     if (!f) return;
-    fprintf(f, "mode=%s\ntheme=%d\nspeed=%ld\nbias=%d\nsound=%d\ncrt=%d\nzen=%d\n"
-               "colorblind=%d\n",
-            mode_name(), g_theme & 7, g_speed,
-            (int)(g_bias * 1000), (int)g_sound, (int)g_crt, (int)g_zen,
-            (int)g_colorblind);
+    (void)fchmod(fileno(f), 0600);
+    char recent[256];
+    mode_recent_csv(recent, sizeof recent);
+    bool ok = fprintf(f, "mode=%s\ntheme=%d\nspeed=%ld\nbias=%d\nsound=%d\ncrt=%d\nzen=%d\n"
+                         "colorblind=%d\nfavorites=%llx\nrecent=%s\n",
+                      mode_name(), g_theme & 7, g_speed,
+                      (int)(g_bias * 1000), (int)g_sound, (int)g_crt, (int)g_zen,
+                      (int)g_colorblind, (unsigned long long)g_favorite_modes, recent) >= 0;
+    if (ok) (void)artifact_commit(f, temp, p);
+    else artifact_abort(f, temp);
+}
+
+static bool studio_session_write_metadata(void) {
+    if (!g_session_enabled || !g_session_meta_path[0]) return true;
+    char temp[ARTIFACT_TEMP_CAP];
+    FILE *f = artifact_open(g_session_meta_path, temp, sizeof temp);
+    if (!f) return false;
+    bool ok = fprintf(f,
+        "schema=1\nmode=%s\nseed=%llu\ntheme=%d\nspeed=%ld\nbias=%d\n"
+        "sound=%d\ncrt=%d\nzen=%d\ncolorblind=%d\npan=%d\nheatmap=%d\n"
+        "entropy=%d\n",
+        mode_name(), (unsigned long long)g_seed, g_theme & 7, g_speed,
+        (int)(g_bias * 1000.0 + 0.5), (int)g_sound, (int)g_crt, (int)g_zen,
+        (int)g_colorblind, (int)g_pan, (int)g_heatmap, (int)g_entropy_view) >= 0;
+    if (ok) ok = artifact_commit(f, temp, g_session_meta_path);
+    else artifact_abort(f, temp);
+    return ok;
+}
+
+static bool studio_session_save(void) {
+    if (!g_session_enabled) return world_save_file(g_world_path);
+    return world_save_file(g_world_path) && studio_session_write_metadata();
+}
+
+static bool studio_session_load(void) {
+    if (!world_load_file(g_world_path)) return false;
+    if (!g_session_enabled || !g_session_meta_path[0]) return true;
+    FILE *f = fopen(g_session_meta_path, "r");
+    if (!f) return true; /* the binary world is still a complete save */
+    char line[128];
+    while (fgets(line, sizeof line, f)) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = 0;
+        char *v = eq + 1;
+        v[strcspn(v, "\r\n")] = 0;
+        long value;
+        if (!strcmp(line, "theme") && parse_long_range(v, 0, 7, &value)) g_theme = (int)value;
+        else if (!strcmp(line, "speed") && parse_long_range(v, 1, MAX_SPEED, &value)) g_speed = value;
+        else if (!strcmp(line, "bias") && parse_long_range(v, 0, 1000, &value)) g_bias = value / 1000.0;
+        else if (!strcmp(line, "sound") && parse_long_range(v, 0, 1, &value)) g_sound = value != 0;
+        else if (!strcmp(line, "crt") && parse_long_range(v, 0, 1, &value)) g_crt = value != 0;
+        else if (!strcmp(line, "zen") && parse_long_range(v, 0, 1, &value)) g_zen = value != 0;
+        else if (!strcmp(line, "colorblind") && parse_long_range(v, 0, 1, &value)) g_colorblind = value != 0;
+        else if (!strcmp(line, "pan") && parse_long_range(v, 0, 1, &value)) g_pan = value != 0;
+        else if (!strcmp(line, "heatmap") && parse_long_range(v, 0, 1, &value)) g_heatmap = value != 0;
+        else if (!strcmp(line, "entropy") && parse_long_range(v, 0, 1, &value)) g_entropy_view = value != 0;
+    }
     fclose(f);
+    BIOMES = BIOMES_SEASONAL[(g_theme & 7) >= 4 ? (g_theme & 7) - 4 : 0];
+    speed_changed();
+    full_repaint_ = true;
+    return true;
 }
 
 int main(int argc, char **argv) {
@@ -182,9 +286,17 @@ int main(int argc, char **argv) {
         snprintf(g_argv0, sizeof g_argv0, "%s", a0);
     }
     cfg_load();
+    if (!mode_registry_valid()) {
+        fputs("mode registry is inconsistent with wfc_mode.h\n", stderr);
+        return 70;
+    }
     char inspect_path[512] = {0};
 #define NEXTV() (++i < argc ? argv[i] : (fprintf(stderr, "missing value for %s\n", argv[i - 1]), exit(2), (char *)NULL))
     for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--version")) {
+            printf("wfc %s\n", WFC_VERSION);
+            return 0;
+        }
         if (!strcmp(argv[i], "--mode")) {
             const char *m = NEXTV();
             int found = -1;
@@ -285,7 +397,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--cycle")) g_cycle = true;
         else if (!strcmp(argv[i], "--zen")) g_zen = true;
         else if (!strcmp(argv[i], "--sound")) g_sound = true;
-        else if (!strcmp(argv[i], "--gallery")) { snprintf(g_gallery_path, sizeof g_gallery_path, "%s", NEXTV()); }
+        else if (!strcmp(argv[i], "--gallery")) {
+            if (!copy_path_arg(g_gallery_path, sizeof g_gallery_path, NEXTV(), "--gallery"))
+                return 2;
+        }
         else if (!strcmp(argv[i], "--gfx")) g_force_gfx = true;
         else if (!strcmp(argv[i], "--no-gfx")) g_no_gfx = true;
         else if (!strcmp(argv[i], "--link")) {
@@ -345,7 +460,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--infinite")) { g_inf = true; g_once = false; }
         else if (!strcmp(argv[i], "--no-bloom")) g_no_bloom = true;
         else if (!strcmp(argv[i], "--no-weather")) g_no_weather = true;
-        else if (!strcmp(argv[i], "--collage")) snprintf(g_collage_path, sizeof g_collage_path, "%s", NEXTV());
+        else if (!strcmp(argv[i], "--collage")) {
+            if (!copy_path_arg(g_collage_path, sizeof g_collage_path, NEXTV(), "--collage"))
+                return 2;
+        }
         else if (!strcmp(argv[i], "--daycycle")) g_daycycle = true;
         else if (!strcmp(argv[i], "--zoom")) {
             long value;
@@ -356,33 +474,42 @@ int main(int argc, char **argv) {
             }
             g_zoom = (int)value;
         }
-        else if (!strcmp(argv[i], "--save")) { snprintf(g_save_path, sizeof g_save_path, "%s", NEXTV()); g_save_auto = true; }
+        else if (!strcmp(argv[i], "--save")) {
+            if (!copy_path_arg(g_save_path, sizeof g_save_path, NEXTV(), "--save"))
+                return 2;
+            g_save_auto = true;
+        }
         else if (!strcmp(argv[i], "--report")) {
             const char *report = NEXTV();
-            if (!*report || strlen(report) >= sizeof g_report_path) {
-                fprintf(stderr, "invalid value for --report\n");
+            if (!copy_path_arg(g_report_path, sizeof g_report_path, report, "--report"))
                 return 2;
-            }
-            snprintf(g_report_path, sizeof g_report_path, "%s", report);
         }
         else if (!strcmp(argv[i], "--world-file")) {
             const char *world = NEXTV();
-            if (!*world || strlen(world) >= sizeof g_world_path) {
-                fprintf(stderr, "invalid value for --world-file\n");
+            if (!copy_path_arg(g_world_path, sizeof g_world_path, world, "--world-file"))
+                return 2;
+        }
+        else if (!strcmp(argv[i], "--session")) {
+            const char *session = NEXTV();
+            if (!copy_path_arg(g_world_path, sizeof g_world_path, session, "--session"))
+                return 2;
+            int n = snprintf(g_session_meta_path, sizeof g_session_meta_path, "%s.meta", g_world_path);
+            if (n < 0 || (size_t)n >= sizeof g_session_meta_path) {
+                fprintf(stderr, "invalid value for --session: metadata path is too long\n");
                 return 2;
             }
-            snprintf(g_world_path, sizeof g_world_path, "%s", world);
+            g_session_enabled = true;
         }
         else if (!strcmp(argv[i], "--inspect-world")) {
             const char *world = NEXTV();
-            if (!*world || strlen(world) >= sizeof inspect_path) {
-                fprintf(stderr, "invalid value for --inspect-world\n");
+            if (!copy_path_arg(inspect_path, sizeof inspect_path, world, "--inspect-world"))
                 return 2;
-            }
-            snprintf(inspect_path, sizeof inspect_path, "%s", world);
         }
-        else if (!strcmp(argv[i], "--gif")) { snprintf(g_gif_path, sizeof g_gif_path, "%s", NEXTV()); g_gif_on = 1; }
-        else if (!strcmp(argv[i], "--version")) { printf("wfc 5.3 \u2014 quality evolution studio\n"); return 0; }
+        else if (!strcmp(argv[i], "--gif")) {
+            if (!copy_path_arg(g_gif_path, sizeof g_gif_path, NEXTV(), "--gif"))
+                return 2;
+            g_gif_on = 1;
+        }
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             printf("wave function collapse, animated in your terminal\n\n"
                    "  --mode NAME                      tileset, one of %d worlds:\n", NMODES);
@@ -399,6 +526,7 @@ int main(int argc, char **argv) {
                    "  --save FILE.png|.bmp             auto-save map on completion\n"
                    "  --report FILE.json               quality + thermo + studio report\n"
                    "  --world-file FILE                W/L interactive world snapshot path\n"
+                   "  --session FILE                   W/L snapshot plus UI metadata sidecar\n"
                    "  --inspect-world FILE             validate and print WFC1 metadata as JSON\n"
                    "  --solver classic|thermo          collapse engine (thermo = adaptive sidecar)\n"
                    "  --no-learn                       disable persistent thermo preferences\n"
@@ -434,8 +562,9 @@ int main(int argc, char **argv) {
                    "      [ ] density | Y red/green assist | a audio | h help\n"
                    "      i iso | , . scrub collapse | wasd hero in dungeon\n"
                    "      l observatory | Q heatmap | E evolution | P pin/unpin hover\n"
+                   "      x repair hotspot | F favorite in picker\n"
                    "      F fullscreen fit | +/- speed p pause g gif s save q quit\n"
-                   "build: cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz\n");
+                   "build: make\n");
             return 0;
         }
         else { fprintf(stderr, "unknown arg %s (try --help)\n", argv[i]); return 2; }
@@ -481,12 +610,13 @@ int main(int argc, char **argv) {
         apply_bloom(big, W3, H3);
         Buf img = png_bytes(big, W3, H3);
         free(big);
-        FILE *fp = fopen(g_collage_path, "wb");
+        char temp[ARTIFACT_TEMP_CAP];
+        FILE *fp = artifact_open(g_collage_path, temp, sizeof temp);
         bool ok = false;
         if (fp) {
             bool wrote = fwrite(img.b, 1, img.n, fp) == img.n;
-            int close_rc = fclose(fp);
-            ok = wrote && close_rc == 0;
+            if (wrote) ok = artifact_commit(fp, temp, g_collage_path);
+            else artifact_abort(fp, temp);
         }
         buf_free(&img);
         if (!ok) {
@@ -625,6 +755,7 @@ int main(int argc, char **argv) {
         }
         QualityMetrics qm = quality_measure(true);
         quality_record(qm);
+        if (g_sound) { ensure_sfx(); play_sfx(SFX_DONE); }
         if (getenv("WFC_DEBUG")) {
             double qr = quality_reward((QualityMetrics){0}, qm, W_ * H_, 0);
             fprintf(stderr, "quality=%.3f validity=%.3f boundary=%.3f coverage=%.3f diversity=%.3f "

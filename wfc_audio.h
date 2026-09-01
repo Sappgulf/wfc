@@ -4,7 +4,7 @@
  * and ambient drones, all derived from the registry
  *
  * wfc is deliberately one translation unit: wfc.c includes these parts in
- * order, so `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz` still builds the whole thing
+ * order, so `make` still builds the whole thing
  * with no build system. They are cut at the section boundaries that were
  * already there, in the order the compiler saw them, so the token stream is
  * unchanged -- these are not independent modules and have no include guards
@@ -21,29 +21,37 @@ static bool g_sfx_ready = false;
 #define SFX_DONE "/tmp/wfx2_done.wav"
 #define SFX_BLIP "/tmp/wfx2_blip.wav"
 
-static void put_u32(FILE *f, uint32_t v) {
+static bool put_u32(FILE *f, uint32_t v) {
     uint8_t b[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
-    fwrite(b, 1, 4, f);
+    return fwrite(b, 1, 4, f) == 4;
 }
-static void put_u16(FILE *f, uint16_t v) {
+static bool put_u16(FILE *f, uint16_t v) {
     uint8_t b[2] = {(uint8_t)v, (uint8_t)(v >> 8)};
-    fwrite(b, 1, 2, f);
+    return fwrite(b, 1, 2, f) == 2;
 }
-static void write_wav(const char *path, const float *samples, int n) {
-    FILE *f = fopen(path, "wb");
-    if (!f) return;
+static bool write_wav(const char *path, const float *samples, int n) {
+    if (!path || !samples || n < 0 ||
+        (uint64_t)n > ((uint64_t)UINT32_MAX - 36) / 2)
+        return false;
+    char temp[ARTIFACT_TEMP_CAP];
+    FILE *f = artifact_open(path, temp, sizeof temp);
+    if (!f) return false;
     uint32_t datasz = (uint32_t)n * 2;
-    fwrite("RIFF", 1, 4, f); put_u32(f, 36 + datasz);
-    fwrite("WAVEfmt ", 1, 8, f); put_u32(f, 16); put_u16(f, 1); put_u16(f, 1);
-    put_u32(f, 44100); put_u32(f, 88200); put_u16(f, 2); put_u16(f, 16);
-    fwrite("data", 1, 4, f); put_u32(f, datasz);
-    for (int i = 0; i < n; i++) {
+    bool ok = fwrite("RIFF", 1, 4, f) == 4 && put_u32(f, 36 + datasz) &&
+              fwrite("WAVEfmt ", 1, 8, f) == 8 && put_u32(f, 16) &&
+              put_u16(f, 1) && put_u16(f, 1) && put_u32(f, 44100) &&
+              put_u32(f, 88200) && put_u16(f, 2) && put_u16(f, 16) &&
+              fwrite("data", 1, 4, f) == 4 && put_u32(f, datasz);
+    for (int i = 0; ok && i < n; i++) {
         float s = samples[i];
+        if (!isfinite(s)) s = 0;
         if (s > 1) s = 1; if (s < -1) s = -1;
         int16_t v16 = (int16_t)(s * 32000);
-        put_u16(f, (uint16_t)v16);
+        ok = put_u16(f, (uint16_t)v16);
     }
-    fclose(f);
+    if (ok) ok = artifact_commit(f, temp, path);
+    else artifact_abort(f, temp);
+    return ok;
 }
 /* Two hand-kept tables of 25 used to carry the sound: stinger note rows and
  * drone roots, both indexed `mi % 25`. Eight worlds past the twenty-fifth
@@ -216,6 +224,17 @@ static void ambient_update(void) {
 #endif
 static void play_sfx(const char *path) {
     if (!g_sound) return;
+    /* A deterministic executable seam lets CI verify dispatch without
+     * launching a host audio player. The normal path remains afplay/aplay. */
+    const char *player = getenv("WFC_AUDIO_PLAYER");
+    if (player && *player) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl(player, player, path, (char *)NULL);
+            _exit(127);
+        }
+        return;
+    }
     char cmd[128];
     PLAY_CMD(path);
     system(cmd);

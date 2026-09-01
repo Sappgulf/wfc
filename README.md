@@ -58,6 +58,9 @@ Press `/` to open the world picker — type to filter, arrows to move, enter to
 go. It previews the highlighted world as a live thumbnail, so you choose by
 looking rather than by reading a name. `m` steps to the next world, `z` shows the all-worlds sheet, `r` the
 raytraced heightfield view, `i` the isometric relief view of any solved world.
+Picker queries also understand `#favorite` and `#recent`; press `f` while the
+picker is open to filter normally, or press `F` to toggle the highlighted world
+as a favorite.
 
 ## Keys
 
@@ -65,11 +68,11 @@ raytraced heightfield view, `i` the isometric relief view of any solved world.
 `z` sheet · `[` / `]` density ·
 `+` / `-` speed · `I` slow-mo · `p` pause · `e` entropy view ·
 `g` gif · `c` auto-cycle · `s` save png · `a` audio · `o` share link ·
-`v` clipboard shot · `k` CRT · `f` drift cam · `W`/`L` world save/load ·
+`v` clipboard shot · `k` CRT · `f` drift cam / `F` picker favorite · `W`/`L` world save/load ·
 `u` undo · `i` iso view · `,` / `.` scrub the collapse in time ·
 `n` zen mode · `T` toggle the thermodynamic solver · `R` reset thermo learning ·
 `l` quality observatory · `P` pin/unpin the hovered cell ·
-`Q` quality heatmap · `E` Evolution Lab (rank seed variants) ·
+`Q` quality heatmap · `E` Evolution Lab (rank seed variants) · `x` repair hotspot ·
 `F` fit the live terminal viewport ·
 `Y` red/green colour assist · `w a s d` hero crawl
 through solved dungeons (light all the torches; `a` moves left there) · `h` help · `q` quit
@@ -97,6 +100,7 @@ into green. The blue shift separates them by 55% instead.
 --gif/--save/--zoom N  exports
 --report out.json       quality, thermo, and studio observatory report
 --world-file out.bin    W/L interactive world snapshot path (default /tmp/wfc_world.bin)
+--session out.bin       W/L snapshot plus a `.meta` sidecar for studio settings
 --inspect-world FILE    validate a WFC1 snapshot and print metadata JSON
 --gallery out.html  all-mode web showcase
 --collage out.png    mosaic of all worlds
@@ -126,7 +130,7 @@ weak or unresolved cell, amber is mixed, and teal is healthy. The overlay is
 diagnostic only; it never changes domains.
 
 `--report FILE.json` writes a reproducible schema-2 snapshot for scripts,
-including mode, seed, dimensions, solver, profile weights, hotspot details,
+including the actual solver backend, mode, seed, dimensions, profile weights, hotspot details,
 macro guidance, Evolution Lab scores, learner counters, and pin count. `P`
 pins the hovered singleton (collapsing it transactionally if needed); `P` again
 or right-click reopens it only where current neighbors allow. `u` restores the
@@ -136,6 +140,15 @@ previous domain and pin state.
 Use `--inspect-world FILE` in scripts or before loading to verify its checksum
 and print the mode, dimensions, seed, density, pin count, and decided cells as
 one JSON object. Corrupt, truncated, or trailing data is rejected.
+Inspection and loading also rebuild the saved mode's grammar: every domain
+must stay inside its seeded boundary mask and every remaining tile must retain
+support across known neighbours. A checksum-valid but semantically impossible
+snapshot is rejected too.
+With `--session FILE`, `W` and `L` also preserve theme, speed, quality bias,
+CRT/zen/colorblind settings, camera pan, heatmap, and entropy state in
+`FILE.meta`. Favorites and recent modes are persisted in the normal config.
+In the observatory, `x` runs a bounded repair pass for the current hotspot while
+preserving pinned cells.
 
 `E` opens the Evolution Lab in classic single-world mode. It derives a small
 tournament of seeds from the current seed, replays current pins into every
@@ -197,8 +210,11 @@ Field worlds open out on a major shape, connector lattices move in fourths and
 fifths, carved worlds sit in a descending minor.
 
 Environmental memory: `~/.wfcrc` remembers mode/theme/speed/density/audio/CRT.
-The test suite points `HOME` at a scratch directory, so running it never reads
-or rewrites your settings.
+It is written through a private temporary file and atomic replacement, so an
+interrupted exit cannot leave a half-configured file or follow a config
+symlink. Synthesized WAV caches and clipboard PNGs use the same publication
+path. The test suite points `HOME` at a scratch directory, so running it never
+reads or rewrites your settings.
 
 ## The thermodynamic solver
 
@@ -275,6 +291,12 @@ finishes in roughly 330 ms instead of the 3 s the old poll interval spent
 waiting on a child that had already answered. Interactive runs still wake on a
 timer, because they have frames to draw between rounds.
 
+CLI output paths are bounded and validated before a solve starts; empty or
+overlong paths fail with exit code 2 instead of being silently truncated.
+PNG, BMP, GIF, gallery, collage, and JSON report artifacts are staged beside
+their destination and atomically published, so interrupted writes cannot leave
+half an artifact (or accidentally overwrite a symlink target).
+
 THRML/JAX is optional. If installed, the legacy one-shot compatibility API can
 use it; the persistent worker deliberately uses its dependency-free bounded
 sampler, so
@@ -286,6 +308,13 @@ point at your venv:
 ```sh
 WFC_PYTHON=/path/to/venv/bin/python ./wfc --solver thermo
 ```
+
+The current reproducible optional environment is captured in
+`requirements-thermo.lock`; `make thermo-env` creates `.venv-thermo` and
+installs it. `make doctor` reports whether the accelerated backend is available,
+which graphics capability was detected, and which audio player can be used.
+The default package-free path is called `python-bounded` in reports, while the
+classic solver reports `classic`.
 
 If the worker itself cannot launch or returns a fatal protocol error, the
 solver notes "thermo failed" and falls back to classic automatically. If it
@@ -316,14 +345,19 @@ as a promise.
 its floor, and p95 latency must stay below its SLO. To keep a local trend
 artifact and compare a later run, use `--save-current FILE` and then
 `--baseline FILE`; the gate allows a bounded latency increase and quality drop.
+`--gallery FILE.html` now emits filterable cards with mode, focus, quality, seed,
+and hotspot metadata; open the file in any browser and sort by quality when
+comparing a run.
 
 ## Test discipline
 
-`make check` is the gate: pedantic build, all 37 modes, seed/argument/export
-regressions, the Python protocol, bridge and learner suites, documentation and
-CLI contracts, the quality benchmark, a 37-mode thermo bridge sweep, pty-driven
-TUI tests, ASan pty coverage, a 222-combo sanitizer sweep of every mode against
-every render toggle (`make sweep`), and a deterministic ASan fuzz (`make fuzz`).
+`make check-fast` is the local edit loop: independent-module contracts,
+pedantic builds, focused Python suites, and CLI/documentation regressions.
+`make check-full` adds all 37 modes, bridge and learner suites, the quality
+benchmark, pty-driven TUI tests, graphics/audio host-boundary smoke tests,
+ASan/UBSan coverage, the 222-combo sanitizer sweep, deterministic fuzz, a
+larger benchmark, and the environment doctor. `make check` remains an alias for
+the full gate.
 
 - 37/37 registered modes solve at the fixed gate size; seeded/toggle variants
   are exercised by the deterministic sweep and fuzz targets
@@ -347,18 +381,27 @@ every render toggle (`make sweep`), and a deterministic ASan fuzz (`make fuzz`).
 - `make interactive-asan-check` repeats those pty paths under ASan
 - `make thermo-check` drives the sidecar protocol across every registry mode
 - `make fuzz` replays the same 50 ASan cases from its printed seed
+- `make graphics-smoke` verifies a real inline-image frame through a pty
+- `make audio-smoke` verifies WAV generation and the configured player boundary
+- `make doctor` prints machine-readable capability information with `--json`
+- `make check-fast` is suitable for every edit; `make check-full` is the release gate
 
-~8,000 lines of C, ~1,600 lines of Python. `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c -lz`
-if you hate make.
+~9,000 lines of C, ~1,600 lines of Python. `make` builds the application; the
+direct equivalent is `cc -O2 -std=c11 -o wfc wfc.c wfc_core.c wfc_mode.c wfc_platform.c wfc_quality.c wfc_solver.c -lz`.
 
-The main program remains one translation unit — the C is split into parts
-purely so it can be navigated, and `wfc.c` includes them in order. The small
-`wfc_core` module is separately compiled so domain invariants have a narrow,
-dependency-free test seam:
+The world/render/export/UI header parts are still included in one application
+translation unit for now, preserving their existing compiler-order contracts.
+The stable seams around that core are independently compiled: mode identity and
+registry validation, platform I/O, quality scoring, generic propagation, and
+domain primitives each have a narrow dependency-free test surface.
 
 | part           | what lives there                                        |
 |----------------|---------------------------------------------------------|
 | `wfc_core.c/.h`| checked domain masks and shared solver invariants        |
+| `wfc_mode.c/.h`| typed mode IDs, names, and registry identity contract   |
+| `wfc_platform.c/.h`| clock, sleep, and input seams for tests/hosts        |
+| `wfc_quality.c/.h`| quality profiles, clamps, and weighted scoring       |
+| `wfc_solver.c/.h`| generic compatibility propagation                      |
 | `wfc.c`        | includes, the part list, argument parsing, `main`        |
 | `wfc_world.h`  | mode registry, rng, tiles, solver, rivers, quality       |
 | `wfc_render.h` | palettes, framebuffer, every world's render, raymarcher  |
@@ -367,5 +410,6 @@ dependency-free test seam:
 | `wfc_thermo.h` | sidecar protocol, counterfactual guard, learned profiles |
 | `wfc_ui.h`     | time travel, crawler, keys, picker, observatory          |
 
-The header parts are still included in their compiler order; `wfc_core.c` is
-the only independent compilation unit and has no application dependencies.
+The header parts are still included in their compiler order, while the five
+small `.c` modules above compile independently and have no terminal/render
+dependencies.

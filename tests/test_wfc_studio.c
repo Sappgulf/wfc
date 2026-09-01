@@ -1,5 +1,7 @@
 #include <assert.h>
+#include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 #include <unistd.h>
 
 #define main wfc_program_main
@@ -82,6 +84,97 @@ int main(void) {
     assert(fclose(bad_save) == 0);
     assert(!world_load_file(save_path));
     unlink(save_path);
+
+    char config_dir[] = "/tmp/wfc-config-test-XXXXXX";
+    assert(mkdtemp(config_dir));
+    char config_sentinel[256], config_path[256];
+    assert(snprintf(config_sentinel, sizeof config_sentinel, "%s/sentinel", config_dir) > 0);
+    assert(snprintf(config_path, sizeof config_path, "%s/.wfcrc", config_dir) > 0);
+    FILE *config_file = fopen(config_sentinel, "w");
+    assert(config_file);
+    assert(fputs("keep me\n", config_file) >= 0);
+    assert(fclose(config_file) == 0);
+    assert(symlink(config_sentinel, config_path) == 0);
+    assert(setenv("HOME", config_dir, 1) == 0);
+    cfg_save();
+    struct stat config_stat;
+    assert(lstat(config_path, &config_stat) == 0 && !S_ISLNK(config_stat.st_mode));
+    config_file = fopen(config_sentinel, "r");
+    assert(config_file);
+    char config_line[32] = {0};
+    assert(fgets(config_line, sizeof config_line, config_file));
+    assert(fclose(config_file) == 0);
+    assert(strcmp(config_line, "keep me\n") == 0);
+    unlink(config_path);
+    unlink(config_sentinel);
+    assert(rmdir(config_dir) == 0);
+
+    char wav_dir[] = "/tmp/wfc-wav-test-XXXXXX";
+    assert(mkdtemp(wav_dir));
+    char wav_sentinel[256], wav_path[256];
+    assert(snprintf(wav_sentinel, sizeof wav_sentinel, "%s/sentinel", wav_dir) > 0);
+    assert(snprintf(wav_path, sizeof wav_path, "%s/out.wav", wav_dir) > 0);
+    FILE *wav_file = fopen(wav_sentinel, "w");
+    assert(wav_file);
+    assert(fputs("keep me\n", wav_file) >= 0);
+    assert(fclose(wav_file) == 0);
+    assert(symlink(wav_sentinel, wav_path) == 0);
+    float sample = 0.0f;
+    write_wav(wav_path, &sample, 1);
+    assert(lstat(wav_path, &config_stat) == 0 && !S_ISLNK(config_stat.st_mode));
+    wav_file = fopen(wav_sentinel, "r");
+    assert(wav_file);
+    memset(config_line, 0, sizeof config_line);
+    assert(fgets(config_line, sizeof config_line, wav_file));
+    assert(fclose(wav_file) == 0);
+    assert(strcmp(config_line, "keep me\n") == 0);
+    wav_file = fopen(wav_path, "rb");
+    assert(wav_file);
+    char riff[4];
+    assert(fread(riff, 1, sizeof riff, wav_file) == sizeof riff);
+    assert(fclose(wav_file) == 0);
+    assert(memcmp(riff, "RIFF", sizeof riff) == 0);
+    unlink(wav_path);
+    unlink(wav_sentinel);
+    assert(rmdir(wav_dir) == 0);
+
+    char session_path[] = "/tmp/wfc-session-test-XXXXXX";
+    int session_fd = mkstemp(session_path);
+    assert(session_fd >= 0);
+    close(session_fd);
+    unlink(session_path);
+    assert(snprintf(g_world_path, sizeof g_world_path, "%s", session_path) > 0);
+    assert(snprintf(g_session_meta_path, sizeof g_session_meta_path, "%s.meta", session_path) > 0);
+    g_session_enabled = true;
+    g_theme = 5;
+    g_speed = 321;
+    g_bias = 0.73;
+    g_sound = true;
+    g_crt = true;
+    g_zen = true;
+    g_colorblind = true;
+    g_pan = true;
+    g_heatmap = true;
+    g_entropy_view = true;
+    assert(studio_session_save());
+    g_theme = 0;
+    g_speed = 1600;
+    g_bias = 0.5;
+    g_sound = false;
+    g_crt = false;
+    g_zen = false;
+    g_colorblind = false;
+    g_pan = false;
+    g_heatmap = false;
+    g_entropy_view = false;
+    assert(studio_session_load());
+    assert(g_theme == 5 && g_speed == 321 && g_bias > 0.729 && g_bias < 0.731);
+    assert(g_sound && g_crt && g_zen && g_colorblind && g_pan && g_heatmap && g_entropy_view);
+    unlink(g_session_meta_path);
+    unlink(g_world_path);
+    g_session_enabled = false;
+    g_session_meta_path[0] = 0;
+    snprintf(g_world_path, sizeof g_world_path, "/tmp/wfc_world.bin");
 
     setup_mode(find_mode("dungeon"));
     W_ = 4;

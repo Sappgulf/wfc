@@ -386,6 +386,57 @@ static bool image_dimensions(int art, int f, int *pw, int *ph) {
     return true;
 }
 
+/* Publish generated artifacts through a same-directory temporary file.  The
+ * final rename is atomic and replaces a symlink itself, so a failed render or
+ * an unexpected link cannot leave a half-written destination behind. */
+#define ARTIFACT_TEMP_CAP 544
+static FILE *artifact_open(const char *path, char *temp, size_t temp_cap) {
+    if (!path || !*path || !temp || temp_cap == 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+    int n = snprintf(temp, temp_cap, "%s.tmp.%ld", path, (long)getpid());
+    if (n < 0 || (size_t)n >= temp_cap) {
+        errno = ENAMETOOLONG;
+        if (temp_cap) temp[0] = 0;
+        return NULL;
+    }
+    int fd = open(temp, O_WRONLY | O_CREAT | O_EXCL | O_TRUNC, 0600);
+    if (fd < 0) return NULL;
+    FILE *fp = fdopen(fd, "wb");
+    if (!fp) {
+        int saved = errno;
+        close(fd);
+        unlink(temp);
+        errno = saved;
+    }
+    return fp;
+}
+
+static void artifact_abort(FILE *fp, const char *temp) {
+    int saved = errno;
+    if (fp) fclose(fp);
+    if (temp && *temp) unlink(temp);
+    errno = saved;
+}
+
+static bool artifact_commit(FILE *fp, const char *temp, const char *path) {
+    if (!fp || !temp || !*temp || !path || !*path) {
+        artifact_abort(fp, temp);
+        errno = EINVAL;
+        return false;
+    }
+    bool ok = fflush(fp) == 0;
+    if (fclose(fp) != 0) ok = false;
+    if (!ok || rename(temp, path) != 0) {
+        int saved = errno;
+        unlink(temp);
+        errno = saved;
+        return false;
+    }
+    return true;
+}
+
 static bool save_bmp(const char *path) {
     const char *mode = mode_name();
     int art = strcmp(mode, "terrain") ? 8 : 16;
@@ -402,7 +453,8 @@ static bool save_bmp(const char *path) {
         set_note("bmp too large (%llux%llu)", (unsigned long long)pw, (unsigned long long)ph);
         return false;
     }
-    FILE *fp = fopen(path, "wb");
+    char temp[ARTIFACT_TEMP_CAP];
+    FILE *fp = artifact_open(path, temp, sizeof temp);
     if (!fp) { set_note("save failed: %s", strerror(errno)); return false; }
     uint32_t imgsz = (uint32_t)tot;
     hdr[0] = 'B'; hdr[1] = 'M';
@@ -423,7 +475,7 @@ static bool save_bmp(const char *path) {
     bool ok = fwrite(hdr, 1, 54, fp) == 54;
     uint8_t *row = calloc(rowb, 1);
     if (!row) {
-        fclose(fp);
+        artifact_abort(fp, temp);
         set_note("save failed: out of memory");
         return false;
     }
@@ -438,7 +490,8 @@ static bool save_bmp(const char *path) {
         if (fwrite(row, 1, rowb, fp) != rowb) ok = false;
     }
     free(row);
-    if (fclose(fp) != 0) ok = false;
+    if (ok) ok = artifact_commit(fp, temp, path);
+    else artifact_abort(fp, temp);
     if (!ok) set_note("save failed (disk?)");
     return ok;
 }
@@ -610,10 +663,12 @@ static bool save_png(const char *path) {
     }
     Buf o = png_bytes(rgb, pw, ph);
     free(rgb);
-    FILE *fp = fopen(path, "wb");
+    char temp[ARTIFACT_TEMP_CAP];
+    FILE *fp = artifact_open(path, temp, sizeof temp);
     if (!fp) { set_note("save failed: %s", strerror(errno)); buf_free(&o); return false; }
     bool ok = fwrite(o.b, 1, o.n, fp) == o.n;
-    if (fclose(fp) != 0) ok = false;
+    if (ok) ok = artifact_commit(fp, temp, path);
+    else artifact_abort(fp, temp);
     if (!ok) set_note("save failed (disk?)");
     buf_free(&o);
     return ok;
@@ -791,13 +846,19 @@ static bool run_gallery(const char *htmlpath) {
              "<title>wave function collapse</title><style>"
              "body{background:#0b0e14;color:#94a3b8;font-family:-apple-system,sans-serif;"
              "margin:24px}h1{color:#e2e8f0;font-weight:600}h1 span{color:#22d3ee}"
+             ".toolbar{display:flex;gap:10px;align-items:center;margin:18px 0}.toolbar input,.toolbar select{"
+             "background:#0f172a;color:#dbeafe;border:1px solid #334155;border-radius:7px;padding:8px 10px}"
+             ".toolbar small{color:#64748b}"
              ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:18px}"
              ".card{background:#131926;border-radius:12px;overflow:hidden}"
              ".card img{width:100%;display:block}.cap{padding:10px 14px;font-size:13px;"
              "display:flex;justify-content:space-between}.cap b{color:#e2e8f0}</style></head><body>"
              "<h1>WAVE FUNCTION <span>COLLAPSE</span></h1>"
              "<p>procedural worlds grown by constraint propagation \u00b7 one file of C \u00b7 "
-             "<code>cc -O2 -std=c11 -o wfc wfc.c -lz</code></p><div class='grid'>");
+             "<code>make</code></p><div class='toolbar'><input id='filter' type='search' "
+             "placeholder='filter mode, focus, or seed'><select id='sort'><option value='mode'>sort by mode</option>"
+             "<option value='quality'>sort by quality</option></select><small id='count'></small></div>"
+             "<div class='grid'>");
     int made = 0;
     for (int mi = 0; mi < NMODES; mi++)
         for (int si = 0; si < 3; si++) {
@@ -812,29 +873,43 @@ static bool run_gallery(const char *htmlpath) {
         }
         if (!solved) fprintf(stderr, "gallery: solver failed for %s seed %llu\n",
                              MODESPEC[mi].name, (unsigned long long)seeds[si]);
+        QualityMetrics gallery_quality = solved ? quality_measure(true) : (QualityMetrics){0};
+        QualityHotspot gallery_hotspot = quality_hotspot();
         Buf img = png_bytes(rgb, pw, ph);
             free(rgb);
             char head[256];
             snprintf(head, sizeof head,
-                     "<div class='card'><img alt='%s' src='data:image/png;base64,",
-                     MODESPEC[mi].name);
+                     "<article class='card' data-mode='%s' data-seed='%llu' data-quality='%.3f' "
+                     "data-focus='%s'><img alt='%s' src='data:image/png;base64,",
+                     MODESPEC[mi].name, (unsigned long long)seeds[si],
+                     gallery_quality.total, quality_profile().focus, MODESPEC[mi].name);
             buf_puts(&page, head);
             b64_append(&page, img.b, img.n);
             snprintf(head, sizeof head,
-                     "'><div class='cap'><b>%s</b><span>seed %llu</span></div></div>",
-                     MODESPEC[mi].name, (unsigned long long)seeds[si]);
+                     "'><div class='cap'><b>%s</b><span>seed %llu</span></div>"
+                     "<div class='meta'><strong>quality %.3f</strong> - focus %s - hotspot %s %.3f</div></article>",
+                     MODESPEC[mi].name, (unsigned long long)seeds[si],
+                     gallery_quality.total, quality_profile().focus,
+                     gallery_hotspot.reason, gallery_hotspot.score);
             buf_puts(&page, head);
             buf_free(&img);
             made++;
             fprintf(stderr, "\rgallery: %d/%d", made, NMODES * 3);
         }
-    buf_puts(&page, "</div></body></html>");
-    FILE *fp = fopen(htmlpath, "wb");
+    buf_puts(&page,
+             "</div><script>const input=document.getElementById('filter'),sort=document.getElementById('sort'),"
+             "grid=document.querySelector('.grid'),cards=[...document.querySelectorAll('.card')],count=document.getElementById('count');"
+             "function refresh(){const q=input.value.toLowerCase();cards.forEach(c=>c.hidden=q&&!((c.dataset.mode+' '+c.dataset.focus+' '+c.dataset.seed).toLowerCase().includes(q)));"
+             "const shown=cards.filter(c=>!c.hidden);count.textContent=shown.length+' of '+cards.length+' maps';"
+             "cards.sort((a,b)=>sort.value==='quality'?Number(b.dataset.quality)-Number(a.dataset.quality):a.dataset.mode.localeCompare(b.dataset.mode)||Number(a.dataset.seed)-Number(b.dataset.seed));"
+             "cards.forEach(c=>grid.appendChild(c));}input.addEventListener('input',refresh);sort.addEventListener('change',refresh);refresh();</script></body></html>");
+    char temp[ARTIFACT_TEMP_CAP];
+    FILE *fp = artifact_open(htmlpath, temp, sizeof temp);
     bool ok = false;
     if (fp) {
         bool wrote = fwrite(page.b, 1, page.n, fp) == page.n;
-        int close_rc = fclose(fp);
-        ok = wrote && close_rc == 0;
+        if (wrote) ok = artifact_commit(fp, temp, htmlpath);
+        else artifact_abort(fp, temp);
     }
     buf_free(&page);
     fprintf(stderr, "\n");
@@ -995,10 +1070,12 @@ static bool write_gif(const char *path) {
     if (!written) { buf_free(&o); return false; }
     buf_u8(&o, 0x3B);
     bool ok = false;
-    FILE *fp = fopen(path, "wb");
+    char temp[ARTIFACT_TEMP_CAP];
+    FILE *fp = artifact_open(path, temp, sizeof temp);
     if (fp) {
-        ok = fwrite(o.b, 1, o.n, fp) == o.n;
-        if (fclose(fp) != 0) ok = false;
+        bool wrote = fwrite(o.b, 1, o.n, fp) == o.n;
+        if (wrote) ok = artifact_commit(fp, temp, path);
+        else artifact_abort(fp, temp);
         if (!ok) set_note("gif failed (disk?)");
     }
     else set_note("gif failed: %s", strerror(errno));

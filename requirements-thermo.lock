@@ -1,0 +1,14 @@
+# Optional accelerator environment for the THRML/JAX one-shot path.
+# This lock is intentionally separate from the dependency-free bounded worker
+# used by the default sidecar, so the base build stays install-free.
+thrml==0.1.4
+equinox==0.13.8
+jaxtyping==0.3.11
+jax==0.11.1
+jaxlib==0.11.1
+ml-dtypes==0.6.0
+numpy==2.5.2
+opt-einsum==3.4.0
+scipy==1.18.1
+typing-extensions==4.16.0
+wadler-lindig==0.1.7

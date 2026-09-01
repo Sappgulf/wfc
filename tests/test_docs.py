@@ -16,6 +16,9 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("./wfc --list-modes", readme)
         self.assertIn("--inspect-world", readme)
         self.assertIn("make perf-check", readme)
+        self.assertIn("make check-fast", readme)
+        self.assertIn("make doctor", readme)
+        self.assertIn("requirements-thermo.lock", readme)
         self.assertIn("all 37 modes", readme)
         self.assertNotIn("all 25 modes", readme)
         for mode in modes:
